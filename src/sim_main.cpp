@@ -78,7 +78,7 @@ static Aircraft mk(const char *call, const char *hex, double distKm, double brgD
     return a;
 }
 
-static void sim_range_cb(float km) { g_set.rangeKm = km; radar::update(g_mockAcs, g_set); }
+static void sim_range_cb(float km) { g_set.rangeKm = km; radar::update(g_mockAcs, g_set); ui_set_range_km(km); }
 
 static void mock_init() {
     g_set.homeLat = HOME_LAT_DEFAULT;
@@ -162,7 +162,8 @@ int main(int argc, char **argv) {
     lv_indev_drv_register(&indev_drv);
 
     ui_create();
-    ui_set_range_cb(sim_range_cb);   // double-click the radar to zoom
+    ui_set_range_cb(sim_range_cb);   // on-screen zoom button
+    ui_set_range_km(RANGE_KM_DEFAULT);
     mock_init();
     radar::update(g_mockAcs, g_set);
     ui_on_data_updated();

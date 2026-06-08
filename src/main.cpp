@@ -156,6 +156,7 @@ static void onRangeChange(float km) {
     g_requeryKm = constrain(km * 1.6f, 50.0f, 200.0f);
     g_requery = true;
     radar::update(g_snap, g_settings);   // instant visual zoom from the last snapshot
+    ui_set_range_km(km);
     ui_on_data_updated();
 }
 
@@ -355,7 +356,8 @@ void setup() {
         radar::setTheme(t);
     }
     radar::setThemeChangedCb(saveTheme);
-    ui_set_range_cb(onRangeChange);   // double-tap the radar to zoom
+    ui_set_range_cb(onRangeChange);              // on-screen zoom button
+    ui_set_range_km(g_settings.rangeKm);         // show the loaded range
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
     battery_begin();   // AXP2101 (no-op if not detected / no battery)

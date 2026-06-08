@@ -9,4 +9,5 @@ void ui_set_battery(int pct, bool charging, bool present);  // top HUD battery i
 void ui_set_date(const char *date);  // top HUD date line (e.g. "08 Jun 2026")
 void ui_set_netinfo(const char *line);  // stats view footer: how to reach the config page
 void ui_splash_show(void);  // branded boot splash (auto-fades, covers init time)
-void ui_set_range_cb(void (*cb)(float km));  // double-tap the radar to cycle zoom -> notify main
+void ui_set_range_cb(void (*cb)(float km));  // on-screen zoom button -> notify main
+void ui_set_range_km(float km);              // update the zoom button label / sync the cycle

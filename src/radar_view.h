@@ -63,5 +63,6 @@ void setTheme(int theme);
 int  theme();
 void cycleTheme();
 void setThemeChangedCb(void (*cb)(int theme));   // called when the theme changes (for persistence)
+void setRangeLabelVisible(bool v);               // hide the built-in range label (UI shows its own)
 
 } // namespace radar

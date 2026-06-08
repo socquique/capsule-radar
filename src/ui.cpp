@@ -76,11 +76,31 @@ static void refresh_card(void) {
 
 // --------------------------------------------------------------------- input
 static bool s_longPressed = false;
-static uint32_t s_lastTapMs = 0;
 static int s_rangeIdx = -1;
 static void (*s_rangeCb)(float) = nullptr;
+static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
 
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
+
+static void zoom_cb(lv_event_t *e) {   // on-screen range control: reliable single tap
+    (void)e;
+    if (!s_rangeCb) return;
+    const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
+    s_rangeIdx = (s_rangeIdx + 1) % n;
+    s_rangeCb(RANGE_STEPS_KM[s_rangeIdx]);
+}
+
+void ui_set_range_km(float km) {
+    if (s_zoomLbl) {
+        char b[16];
+        snprintf(b, sizeof(b), LV_SYMBOL_LOOP " %.0f km", (double)km);
+        lv_label_set_text(s_zoomLbl, b);
+    }
+    int best = 0; float bd = 1e9f;                 // sync the cycle index to the shown range
+    const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
+    for (int i = 0; i < n; ++i) { float d = km - RANGE_STEPS_KM[i]; if (d < 0) d = -d; if (d < bd) { bd = d; best = i; } }
+    s_rangeIdx = best;
+}
 
 static void radar_press_cb(lv_event_t *e) { (void)e; s_longPressed = false; }
 
@@ -93,20 +113,6 @@ static void radar_longpress_cb(lv_event_t *e) {   // long-press cycles the visua
 static void radar_clicked_cb(lv_event_t *e) {
     (void)e;
     if (s_longPressed) { s_longPressed = false; return; }   // ignore the click after a long-press
-
-    const uint32_t now = lv_tick_get();
-    if (s_lastTapMs && now - s_lastTapMs < 500) {           // double-tap -> cycle zoom range
-        s_lastTapMs = 0;
-        if (s_rangeCb) {
-            const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
-            s_rangeIdx = (s_rangeIdx + 1) % n;
-            s_rangeCb(RANGE_STEPS_KM[s_rangeIdx]);
-        }
-        return;
-    }
-    s_lastTapMs = now;
-
-    if (lv_event_get_target(e) == s_card) return;           // taps on the detail card never select
     lv_indev_t *indev = lv_indev_get_act();
     if (!indev) return;
     lv_point_t p;
@@ -244,7 +250,6 @@ static void build_card(void) {
     lv_obj_add_flag(s_card, LV_OBJ_FLAG_CLICKABLE);   // consume taps (don't deselect)
     lv_obj_clear_flag(s_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(s_card, radar_clicked_cb, LV_EVENT_CLICKED, NULL);  // double-tap works over the card too
 
     s_cardTitle = lv_label_create(s_card);
     lv_obj_set_style_text_font(s_cardTitle, &lv_font_montserrat_16, 0);
@@ -353,11 +358,30 @@ void ui_create(void) {
     // --- radar tile ---
     lv_obj_clear_flag(s_tileRadar, LV_OBJ_FLAG_SCROLLABLE);
     radar::init(s_tileRadar);
+    radar::setRangeLabelVisible(false);                     // the zoom button shows the range instead
     lv_obj_add_flag(s_tileRadar, LV_OBJ_FLAG_CLICKABLE);     // receive taps (planes/empty)
     lv_obj_add_event_cb(s_tileRadar, radar_clicked_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_press_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
     build_card();
+
+    // on-screen range/zoom button (reliable single tap; bottom, above the 'S' marker)
+    s_zoomBtn = lv_btn_create(s_tileRadar);
+    lv_obj_set_size(s_zoomBtn, 104, 36);
+    lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -34);
+    lv_obj_set_style_radius(s_zoomBtn, 18, 0);
+    lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
+    lv_obj_set_style_bg_opa(s_zoomBtn, 225, 0);
+    lv_obj_set_style_border_color(s_zoomBtn, UI_GREEN, 0);
+    lv_obj_set_style_border_width(s_zoomBtn, 1, 0);
+    lv_obj_set_style_border_opa(s_zoomBtn, 170, 0);
+    lv_obj_clear_flag(s_zoomBtn, LV_OBJ_FLAG_SCROLL_CHAIN);  // tapping it must not swipe the tileview
+    lv_obj_add_event_cb(s_zoomBtn, zoom_cb, LV_EVENT_CLICKED, NULL);
+    s_zoomLbl = lv_label_create(s_zoomBtn);
+    lv_label_set_text(s_zoomLbl, LV_SYMBOL_LOOP " 30 km");
+    lv_obj_set_style_text_font(s_zoomLbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
+    lv_obj_center(s_zoomLbl);
 
     // top status HUD (wifi / aircraft count / clock); white reads on both themes
     s_hudWifi = lv_label_create(s_tileRadar);

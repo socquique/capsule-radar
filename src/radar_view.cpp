@@ -72,6 +72,7 @@ static lv_obj_t  *s_rose[4]   = {nullptr, nullptr, nullptr, nullptr};
 static lv_obj_t  *s_centerDot = nullptr;
 static lv_obj_t  *s_pulse     = nullptr;
 static lv_obj_t  *s_rangeLbl  = nullptr;
+static bool       s_rangeLblVisible = true;
 static lv_timer_t *s_timer    = nullptr;
 static float       s_sweepDeg = 0.0f;
 static float       s_prevSweepDeg = 0.0f;
@@ -541,7 +542,7 @@ void setTheme(int t) {
         lv_obj_set_style_bg_opa(s_parent, LV_OPA_COVER, 0);
     }
     for (int i = 0; i < 4; ++i) show(s_rose[i], !drg);   // hide compass in DBZ
-    show(s_rangeLbl, !drg);
+    show(s_rangeLbl, !drg && s_rangeLblVisible);
     show(s_centerDot, !drg);                             // dragon draws an orange triangle instead
     show(s_pulse, !drg);
 
@@ -560,6 +561,7 @@ void setTheme(int t) {
 int  theme() { return s_theme; }
 void cycleTheme() { setTheme(s_theme + 1); }
 void setThemeChangedCb(void (*cb)(int)) { s_themeCb = cb; }
+void setRangeLabelVisible(bool v) { s_rangeLblVisible = v; if (s_rangeLbl) show(s_rangeLbl, v && !dragon()); }
 
 void init(void *lv_parent) {
     lv_obj_t *parent = (lv_obj_t *)lv_parent;
