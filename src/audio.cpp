@@ -10,6 +10,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "driver/i2s.h"
+#include "esp_heap_caps.h"
 #include <math.h>
 
 #define ES8311_ADDR   0x18
@@ -17,6 +18,8 @@
 #define I2S_PORT      I2S_NUM_0
 
 static bool s_ok = false;
+static int16_t *s_buf = nullptr;     // tone scratch in PSRAM (keeps internal RAM free for TLS)
+static const size_t S_BUF_LEN = SR / 2 * 2;   // up to 500 ms, stereo interleaved
 static volatile int  s_vol = 60;     // 0..100
 static volatile bool s_muted = false;
 static volatile int  s_cue = -1;
@@ -61,7 +64,7 @@ static void es8311_init() {
     es_write(0x11, 0x7F);
     es_write(0x00, 0x80);                 // reset csm/clock, slave mode
     es_write(0x00, 0x80);                 // slave: bit6=0
-    es_write(0x01, 0x3F);                 // clk src = external MCLK, enable codec clocks
+    es_write(0x01, 0xBF);                 // clk src = SCLK/BCLK-derived (no external MCLK needed)
     es_update(0x06, (uint8_t)~0x20, 0x00); // SCLK not inverted
     es_write(0x13, 0x10);
     es_write(0x1B, 0x0A);
@@ -69,7 +72,7 @@ static void es8311_init() {
     es_write(0x44, 0x58);                 // internal reference (ADCL + DACR) -> drives DAC
 
     // --- config_sample(): MCLK 4.096 MHz / 16 kHz coeff {pre=1,mult=1,adc=1,dac=1,osr 0x10/0x20,lrck 0xFF,bclk 4} ---
-    es_write(0x02, 0x00);                 // pre_div=1, pre_multi=1
+    es_write(0x02, 0x18);                 // pre_div=1, pre_multi=8 (BCLK*8 = DIG_MCLK, use_mclk=false)
     es_write(0x05, 0x00);                 // adc_div=1, dac_div=1
     es_write(0x03, 0x10);                 // fs_mode=0, adc_osr=0x10
     es_write(0x04, 0x20);                 // dac_osr=0x20
@@ -83,7 +86,7 @@ static void es8311_init() {
 
     // --- start() (DAC, slave) ---
     es_write(0x00, 0x80);
-    es_write(0x01, 0x3F);
+    es_write(0x01, 0xBF);                 // keep BCLK-derived clock
     es_write(0x09, 0x0C);                 // DAC iface enabled (bit6=0)
     es_write(0x0A, 0x0C);
     es_write(0x17, 0xBF);
@@ -108,7 +111,7 @@ static bool i2s_setup() {
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;       // stereo
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    cfg.dma_buf_count = 6;
+    cfg.dma_buf_count = 4;
     cfg.dma_buf_len = 256;
     cfg.use_apll = false;
     cfg.tx_desc_auto_clear = true;
@@ -144,20 +147,23 @@ static size_t gen_beep(int16_t *buf, size_t cap, float freq, int ms, float amp) 
 }
 
 static void play_cue(int cue) {
-    if (!s_ok || s_muted || s_vol <= 0) return;
-    static int16_t buf[SR / 2 * 2];                // up to 500 ms stereo
+    if (!s_ok || !s_buf || (s_muted && cue != 2) || s_vol <= 0) return;
+    int16_t *buf = s_buf;
     const float amp = (s_vol / 100.0f) * 17000.0f;
     digitalWrite(PIN_AUDIO_PA, HIGH);              // enable speaker amp
-    delay(2);
+    delay(8);                                      // let the amp power up
     size_t bw;
-    if (cue == AUDIO_ALERT) {
+    if (cue == 2) {                                // self-test: ~2 s continuous tone, PA held
+        size_t ns = gen_beep(buf, S_BUF_LEN, 1000.0f, 480, amp);
+        for (int k = 0; k < 4; ++k) i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
+    } else if (cue == AUDIO_ALERT) {
         for (int k = 0; k < 2; ++k) {
-            size_t ns = gen_beep(buf, sizeof(buf) / 2, 1320.0f, 80, amp);
+            size_t ns = gen_beep(buf, S_BUF_LEN, 1320.0f, 80, amp);
             i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
             delay(40);
         }
     } else {
-        size_t ns = gen_beep(buf, sizeof(buf) / 2, 880.0f, 110, amp * 0.8f);
+        size_t ns = gen_beep(buf, S_BUF_LEN, 880.0f, 110, amp * 0.8f);
         i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
     }
     i2s_zero_dma_buffer(I2S_PORT);
@@ -183,8 +189,19 @@ bool audio_begin() {
     }
     es8311_init();
 
+    const uint8_t dr[] = {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x09,0x0A,0x0D,0x0E,0x12,0x14,0x31,0x32,0x37,0x44};
+    Serial.print("[audio] ES8311 regs:");
+    for (uint8_t r : dr) Serial.printf(" %02X=%02X", r, es_read(r));
+    Serial.println();
+
     if (!i2s_setup()) {
         Serial.println("[audio] I2S init failed");
+        s_ok = false;
+        return false;
+    }
+    s_buf = (int16_t *)heap_caps_malloc(S_BUF_LEN * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!s_buf) {
+        Serial.println("[audio] tone buffer alloc failed");
         s_ok = false;
         return false;
     }
@@ -202,5 +219,11 @@ void audio_set_muted(bool m) { s_muted = m; }
 void audio_play(AudioCue cue) {
     if (!s_ok || s_muted) return;
     s_cue = (int)cue;
+    if (s_sem) xSemaphoreGive(s_sem);
+}
+
+void audio_selftest() {   // ~2 s continuous tone, ignores mute, PA held on
+    if (!s_ok) return;
+    s_cue = 2;
     if (s_sem) xSemaphoreGive(s_sem);
 }

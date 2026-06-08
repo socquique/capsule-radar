@@ -16,3 +16,4 @@ bool audio_present();
 void audio_set_volume(int pct);     // 0..100 (software amplitude)
 void audio_set_muted(bool muted);
 void audio_play(AudioCue cue);      // non-blocking: signals the playback task
+void audio_selftest();              // ~2 s continuous tone for by-ear verification

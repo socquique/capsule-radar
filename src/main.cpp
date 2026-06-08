@@ -319,7 +319,10 @@ static void handleVol() {
         p.putBool("mute", g_muted);
         p.end();
     }
-    if (g_web.hasArg("test")) audio_play(AUDIO_NEW);   // by-ear check
+    if (g_web.hasArg("test")) {
+        if (g_web.arg("test").toInt() == 2) audio_selftest();   // long tone, ignores mute
+        else audio_play(AUDIO_NEW);
+    }
     g_web.send(200, "text/plain", "ok");
 }
 
@@ -356,6 +359,7 @@ void setup() {
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
     battery_begin();   // AXP2101 (no-op if not detected / no battery)
+    battery_enable_codec_rail();   // power the ES8311 analog rail before audio init
 
     setenv("TZ", TZ_STR, 1); tzset();   // local time for display even before NTP
     rtc_begin();

@@ -25,3 +25,10 @@ bool battery_begin() {
 bool battery_present()  { return s_ok && PMU.isBatteryConnect(); }
 int  battery_percent()  { return s_ok ? PMU.getBatteryPercent() : -1; }
 bool battery_charging() { return s_ok && PMU.isCharging(); }
+
+void battery_enable_codec_rail() {
+    if (!s_ok) return;
+    PMU.setALDO1Voltage(3300);   // ES8311 analog supply (the reference board enables this)
+    PMU.enableALDO1();
+    Serial.println("[batt] ALDO1 (codec AVDD) enabled @3.3V");
+}
