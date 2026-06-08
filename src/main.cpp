@@ -25,6 +25,7 @@
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
 #include <Update.h>                 // browser OTA: self-flash an uploaded .bin
+#include <esp_heap_caps.h>          // largest-free-block metric (heap health)
 
 // ---- shared state ----
 static std::vector<Aircraft> g_aircraft;      // latest snapshot
@@ -558,8 +559,9 @@ void loop() {
     static uint32_t lastStatus = 0;
     if (millis() - lastStatus > 5000) {
         lastStatus = millis();
-        Serial.printf("[mem] heap %u (min %u) | psram %u free | up %lus | aircraft %d\n",
+        Serial.printf("[mem] heap %u (min %u, biggest %u) | psram %u free | up %lus | aircraft %d\n",
                       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                       (unsigned)ESP.getFreePsram(), (unsigned long)(millis() / 1000),
                       (int)g_snap.size());
         char clk[8] = "--:--";
