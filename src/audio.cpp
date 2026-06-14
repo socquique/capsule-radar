@@ -7,6 +7,7 @@
 // that table is board-specific, the rest is independent.
 #include "audio.h"
 #include "config.h"
+#include "app_log.h"
 #include <Arduino.h>
 #include <Wire.h>
 #include "driver/i2s.h"
@@ -111,8 +112,8 @@ static bool i2s_setup() {
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;       // stereo
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    cfg.dma_buf_count = 4;
-    cfg.dma_buf_len = 256;
+    cfg.dma_desc_num = 4;
+    cfg.dma_frame_num = 256;
     cfg.use_apll = false;
     cfg.tx_desc_auto_clear = true;
     cfg.fixed_mclk = 0;
@@ -182,32 +183,37 @@ bool audio_begin() {
 
     const uint8_t id1 = es_read(0xFD), id2 = es_read(0xFE);   // expect 0x83, 0x11
     if (id1 != 0x83) {
-        Serial.printf("[audio] ES8311 not found (id=0x%02X 0x%02X)\n", id1, id2);
+        app_log_printf("[audio] ES8311 not found (id=0x%02X 0x%02X)\n", id1, id2);
         s_ok = false;
         return false;
     }
     es8311_init();
 
     const uint8_t dr[] = {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x09,0x0A,0x0D,0x0E,0x12,0x14,0x31,0x32,0x37,0x44};
-    Serial.print("[audio] ES8311 regs:");
-    for (uint8_t r : dr) Serial.printf(" %02X=%02X", r, es_read(r));
-    Serial.println();
+    char regs[180];
+    int used = snprintf(regs, sizeof(regs), "[audio] ES8311 regs:");
+    for (uint8_t r : dr) {
+        if (used < (int)sizeof(regs)) {
+            used += snprintf(regs + used, sizeof(regs) - used, " %02X=%02X", r, es_read(r));
+        }
+    }
+    app_log_println(regs);
 
     if (!i2s_setup()) {
-        Serial.println("[audio] I2S init failed");
+        app_log_println("[audio] I2S init failed");
         s_ok = false;
         return false;
     }
     s_buf = (int16_t *)heap_caps_malloc(S_BUF_LEN * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (!s_buf) {
-        Serial.println("[audio] tone buffer alloc failed");
+        app_log_println("[audio] tone buffer alloc failed");
         s_ok = false;
         return false;
     }
     s_sem = xSemaphoreCreateBinary();
     xTaskCreatePinnedToCore(audio_task, "audio", 4096, nullptr, 1, nullptr, 0);  // I2S only -> core 0
     s_ok = true;
-    Serial.println("[audio] ES8311 ready");
+    app_log_println("[audio] ES8311 ready");
     return true;
 }
 

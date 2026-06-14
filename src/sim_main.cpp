@@ -64,8 +64,8 @@ static RadarSettings g_set;
 static Aircraft mk(const char *call, const char *hex, double distKm, double brgDeg,
                    float altFt, float track, float gsKt, int sq) {
     Aircraft a;
-    a.flight = call;
-    a.hex = hex;
+    snprintf(a.flight, sizeof(a.flight), "%s", call ? call : "");
+    snprintf(a.hex, sizeof(a.hex), "%s", hex ? hex : "");
     const double br = brgDeg * M_PI / 180.0;
     const double latR = HOME_LAT_DEFAULT * M_PI / 180.0;
     a.lat = HOME_LAT_DEFAULT + (distKm * cos(br)) / 111.0;
@@ -258,8 +258,8 @@ int main(int argc, char **argv) {
                 { "dragon", 0, THEME_DRAGON   },
                 { "amber",  0, THEME_AMBER    },
                 { "military",0, THEME_MILITARY },
-                { "list",   1, THEME_PHOSPHOR },
-                { "stats",  2, THEME_PHOSPHOR },
+                { "list",   2, THEME_PHOSPHOR },
+                { "stats",  3, THEME_PHOSPHOR },
             };
             for (int v = 0; v < 6; ++v) {
                 radar::setTheme(shots[v].theme);

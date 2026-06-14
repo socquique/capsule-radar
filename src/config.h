@@ -9,9 +9,13 @@
 #define HOME_LON_DEFAULT    0.1059
 
 // ---------- Radar ----------
-#define RANGE_KM_DEFAULT    30.0f          // display range (outer ring). Query is wider, see ADSB_QUERY_KM
-#define ADSB_QUERY_KM       50.0f          // feed query radius (> display: off-range traffic shows as edge arrows)
-static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
+#define RANGE_KM_DEFAULT    30.0f          // display range (outer ring)
+#define ADSB_QUERY_FACTOR   1.6f           // query wider than display so off-range traffic can show as edge arrows
+#define ADSB_QUERY_MIN_KM   15.0f          // avoid over-fetching on the close 3 mi / 5 km range
+#define ADSB_QUERY_MAX_KM   200.0f         // keep busy-area JSON bounded
+#define MAP_PAN_GAIN        2.2f           // two-finger drag sensitivity; higher moves the map farther per finger pixel
+#define MAP_PAN_CACHE_FACTOR 3.0f          // preload airports this many display-ranges around the center for smooth dragging
+static const float RANGE_STEPS_KM[] = {5.0f, 10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define POLL_INTERVAL_MS    2000           // be gentle with the free API (>=1000)
 #define POLL_INTERVAL_BATTERY_MS 5000      // slower polling when running on battery
 #define MOTION_INTERP       1              // 1 = glyphs glide between polls; 0 = snap to new pos
@@ -28,16 +32,18 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define LCD_ROW_OFFSET      0              // no row (y) gap
 #define LCD_QSPI_HZ         80000000       // CO5300 QSPI clock (vendor uses 40 MHz; 80 = faster, verify no artifacts)
 #define BRIGHTNESS_DEFAULT  200            // 0..255, panel brightness via cmd 0x51
-#define TZ_STR              "CET-1CEST,M3.5.0,M10.5.0/3"  // POSIX TZ (Spain) for local time/date
+#define TZ_STR              "UTC0"          // Factory default timezone; web portal selection overrides this.
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch
 
 // ---------- ADS-B API (free, non-commercial) ----------
 #define ADSB_PRIMARY_HOST   "api.airplanes.live"   // GET /v2/point/{lat}/{lon}/{radius_nm}
 #define ADSB_FALLBACK_HOST  "api.adsb.lol"          // same readsb format
-#define ADSB_USER_AGENT     "CapsuleRadar/1.0 (ESP32-S3 hobby; +https://github.com/socquique/capsule-radar)"
+#define ADSB_USER_AGENT     "CapsuleRadar/2.0 (ESP32-S3 hobby; +https://github.com/socquique/capsule-radar)"
 #define ADSB_HTTPS_INSECURE 1               // 1 = setInsecure() (hobby). 0 = use pinned root CA.
 #define ADSB_MAX_AIRCRAFT   60              // hard cap parsed per poll (protect RAM in busy areas)
+#define ADSB_MAX_JSON_BYTES  262144          // max ADS-B response body kept in PSRAM before parsing
+#define TLS_INTERNAL_MIN_BYTES 28000         // minimum largest internal heap block before starting HTTPS/TLS
 
 // ---------- Debug ----------
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial
@@ -62,6 +68,7 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 // CONFIRMED — shared I2C bus (touch + IMU + RTC + PMIC + audio codec):
 #define PIN_I2C_SDA         15
 #define PIN_I2C_SCL         14
+#define I2C_BUS_HZ          100000         // conservative shared bus speed: touch, PMIC, IMU, RTC, audio codec
 
 // CONFIRMED — ES8311 codec over I2S (M4 alert ping). MCLK/DIN/PA included for completeness:
 #define PIN_I2S_MCLK        42

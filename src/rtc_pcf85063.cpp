@@ -1,5 +1,6 @@
 #include "rtc_pcf85063.h"
 #include "config.h"
+#include "app_log.h"
 #include <Arduino.h>
 #include <Wire.h>
 
@@ -13,9 +14,10 @@ static inline uint8_t bcd2dec(uint8_t b) { return (uint8_t)((b >> 4) * 10 + (b &
 static inline uint8_t dec2bcd(uint8_t d) { return (uint8_t)(((d / 10) << 4) | (d % 10)); }
 
 bool rtc_begin() {
+    Wire.setTimeOut(20);
     Wire.beginTransmission(I2C_ADDR_RTC);
     s_ok = (Wire.endTransmission() == 0);
-    Serial.printf("[rtc] PCF85063 %s\n", s_ok ? "ready" : "not found");
+    app_log_printf("[rtc] PCF85063 %s\n", s_ok ? "ready" : "not found");
     return s_ok;
 }
 
@@ -23,10 +25,17 @@ bool rtc_present() { return s_ok; }
 
 bool rtc_read(struct tm *out) {
     if (!s_ok || !out) return false;
-    Wire.beginTransmission(I2C_ADDR_RTC);
-    Wire.write(REG_SECONDS);
-    if (Wire.endTransmission(false) != 0) return false;          // repeated start
-    if (Wire.requestFrom((int)I2C_ADDR_RTC, 7) != 7) return false;
+    bool readOk = false;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        Wire.beginTransmission(I2C_ADDR_RTC);
+        Wire.write(REG_SECONDS);
+        if (Wire.endTransmission(false) == 0 && Wire.requestFrom((int)I2C_ADDR_RTC, 7) == 7) {
+            readOk = true;
+            break;
+        }
+        delayMicroseconds(500);
+    }
+    if (!readOk) return false;
     const uint8_t s  = Wire.read();
     const uint8_t mi = Wire.read();
     const uint8_t h  = Wire.read();
@@ -47,14 +56,18 @@ bool rtc_read(struct tm *out) {
 
 bool rtc_write(const struct tm *t) {
     if (!s_ok || !t) return false;
-    Wire.beginTransmission(I2C_ADDR_RTC);
-    Wire.write(REG_SECONDS);
-    Wire.write(dec2bcd((uint8_t)t->tm_sec) & 0x7F);              // also clears VL
-    Wire.write(dec2bcd((uint8_t)t->tm_min));
-    Wire.write(dec2bcd((uint8_t)t->tm_hour));
-    Wire.write(dec2bcd((uint8_t)t->tm_mday));
-    Wire.write(0);                                               // weekday (unused)
-    Wire.write(dec2bcd((uint8_t)(t->tm_mon + 1)));
-    Wire.write(dec2bcd((uint8_t)(t->tm_year - 100)));
-    return Wire.endTransmission() == 0;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        Wire.beginTransmission(I2C_ADDR_RTC);
+        Wire.write(REG_SECONDS);
+        Wire.write(dec2bcd((uint8_t)t->tm_sec) & 0x7F);              // also clears VL
+        Wire.write(dec2bcd((uint8_t)t->tm_min));
+        Wire.write(dec2bcd((uint8_t)t->tm_hour));
+        Wire.write(dec2bcd((uint8_t)t->tm_mday));
+        Wire.write(0);                                               // weekday (unused)
+        Wire.write(dec2bcd((uint8_t)(t->tm_mon + 1)));
+        Wire.write(dec2bcd((uint8_t)(t->tm_year - 100)));
+        if (Wire.endTransmission() == 0) return true;
+        delayMicroseconds(500);
+    }
+    return false;
 }

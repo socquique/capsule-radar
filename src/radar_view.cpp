@@ -12,11 +12,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <array>
 #include <string>
-#include <map>
-#include <set>
 #include <vector>
-#include <deque>
 #include <algorithm>
 #include <stdlib.h>
 #if defined(ESP_PLATFORM)
@@ -33,6 +31,7 @@
 #define COL_INK    lv_color_hex(0xEAFFF3)
 #define COL_SOFT   lv_color_hex(0x9AFFC8)
 #define COL_EMERG  lv_color_hex(0xFF5A3C)
+#define COL_MIL    lv_color_hex(0xFFB23C)
 // coastline outline — steel blue, deliberately off the red/amber/lime/green/cyan
 // altitude-trail palette so land never reads as an aircraft track.
 #define COAST_COLOR lv_color_hex(0x4E86C6)
@@ -48,18 +47,21 @@
 #define DRG_FLOW   lv_color_hex(0xFFC24D)
 
 // ---- sweep config ----
-#define SWEEP_PERIOD_MS   8000
-#define SWEEP_FRAME_MS    30
-#define SWEEP_TRAIL_DEG   38.0f
-#define SWEEP_TRAIL_STEPS 20
+#define SWEEP_PERIOD_MS   10000
+#define SWEEP_FRAME_MS    20
+#define SWEEP_MAX_ELAPSED_MS 50
+#define SWEEP_TRAIL_DEG   24.0f
+#define SWEEP_TRAIL_STEPS 8
 #define SWEEP_TRAIL_OPA   72
 
 // ---- aircraft / flow / dragon config ----
-#define TRAIL_MAX         7
+#define TRAIL_MAX         10
+#define TRAIL_TTL_MS      180000UL
 #define TAP_RADIUS_PX     40    // generous finger-tap catch radius (picks the nearest glyph within it)
+#define FLOW_CANVAS_ENABLED 1    // dim fading "frequently traveled path" layer
 #define FLOW_MAX          700
-#define FLOW_REDRAW_EVERY 80
-#define FLOW_OPA          55
+#define FLOW_TTL_MS       180000UL
+#define FLOW_OPA          58
 #define DRAGON_BALLS      7
 #define DRAGON_ARROWS     8
 #define BALL_R            9
@@ -82,20 +84,28 @@ static lv_obj_t  *s_rangeLbl  = nullptr;
 static bool       s_rangeLblVisible = true;
 static bool       s_sweepEnabled    = true;
 static bool       s_airportsEnabled = true;
+static bool       s_groundAircraftEnabled = false;
 static lv_timer_t *s_timer    = nullptr;
+static lv_anim_t   s_pulseAnim;
+static bool        s_pulseAnimRunning = false;
 static float       s_sweepDeg = 0.0f;
 static float       s_prevSweepDeg = 0.0f;
 static float       s_wavePhase = 0.0f;
+static uint32_t    s_lastSweepTickMs = 0;
 static uint32_t    s_lastUpdateMs = 0;       // smooth-motion: cadence + animation clock
 static uint32_t    s_animStartMs  = 0;
 static uint32_t    s_pollMs       = POLL_INTERVAL_MS;
+static uint32_t    s_lastFlowRefreshMs = 0;
 static int         s_frameCtr     = 0;
 static lv_coord_t  s_cx = SCREEN_CX, s_cy = SCREEN_CY;
 static std::string s_selHex;
 
-struct FlowSeg { lv_point_t a, b; };
-static std::deque<FlowSeg> s_flow;
-static int s_flowRedrawCtr = 0;
+struct FlowSeg { lv_point_t a, b; uint32_t bornMs; };
+static FlowSeg *s_flow = nullptr;
+static uint16_t s_flowHead = 0;
+static uint16_t s_flowCount = 0;
+
+struct TrailPt { lv_point_t p; uint32_t bornMs; };
 
 struct AcDraw {
     lv_point_t pos;            // current (animated) screen position — what gets drawn
@@ -103,7 +113,9 @@ struct AcDraw {
     float      track;
     lv_color_t color;
     bool       emergency;
+    bool       military;
     bool       inRange;
+    double     lat, lon;
     char       hex[8];
     char       call[12];
     char       type[8];
@@ -112,15 +124,45 @@ struct AcDraw {
     bool       onGround;
     float      vsFpm, gsKt, distKm, bearingDeg;
     int        squawk;
-    std::vector<lv_point_t> trail;
+    TrailPt    trail[TRAIL_MAX];
+    uint8_t    trailCount;
 };
 static std::vector<AcDraw> s_acs;
-static std::map<std::string, std::vector<lv_point_t>> s_trails;
+using HexKey = std::array<char, 8>;
+struct TrailTrack {
+    char hex[8];
+    TrailPt pts[TRAIL_MAX];
+    uint8_t count;
+    bool seen;
+};
+static std::vector<TrailTrack> s_trails;
 
 static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool dragon() { return s_theme == THEME_DRAGON; }
+
+static bool contains_hex(const std::vector<HexKey> &keys, const char *hex) {
+    for (const HexKey &key : keys) {
+        if (strcmp(key.data(), hex) == 0) return true;
+    }
+    return false;
+}
+
+static TrailTrack *find_trail(const char *hex) {
+    for (TrailTrack &t : s_trails) {
+        if (strcmp(t.hex, hex) == 0) return &t;
+    }
+    return nullptr;
+}
+
+static TrailTrack *find_or_add_trail(const char *hex) {
+    if (TrailTrack *t = find_trail(hex)) return t;
+    TrailTrack t{};
+    snprintf(t.hex, sizeof(t.hex), "%s", hex ? hex : "");
+    s_trails.push_back(t);
+    return &s_trails.back();
+}
 
 static void show(lv_obj_t *o, bool v) {
     if (!o) return;
@@ -156,21 +198,68 @@ static inline lv_point_t rot_pt(float px, float py, float deg, lv_coord_t ox, lv
 }
 
 // =============================== flow map ====================================
-static void flow_draw_seg(const FlowSeg &s) {
+static FlowSeg &flow_at(uint16_t i) {
+    return s_flow[(uint16_t)((s_flowHead + i) % FLOW_MAX)];
+}
+
+static void flow_clear(void) {
+    s_flowHead = 0;
+    s_flowCount = 0;
+}
+
+static void flow_prune(uint32_t now) {
+#if FLOW_CANVAS_ENABLED
+    if (!s_flow) return;
+    while (s_flowCount > 0 && (uint32_t)(now - flow_at(0).bornMs) > FLOW_TTL_MS) {
+        s_flowHead = (uint16_t)((s_flowHead + 1) % FLOW_MAX);
+        s_flowCount--;
+    }
+#else
+    (void)now;
+#endif
+}
+
+static void flow_push(const FlowSeg &seg) {
+#if FLOW_CANVAS_ENABLED
+    if (!s_flow) return;
+    if (s_flowCount >= FLOW_MAX) {
+        s_flowHead = (uint16_t)((s_flowHead + 1) % FLOW_MAX);
+        s_flowCount--;
+    }
+    s_flow[(uint16_t)((s_flowHead + s_flowCount) % FLOW_MAX)] = seg;
+    s_flowCount++;
+#else
+    (void)seg;
+#endif
+}
+
+static void flow_draw_seg(const FlowSeg &s, uint32_t now) {
+#if FLOW_CANVAS_ENABLED
     if (!s_flowCanvas) return;
+    const uint32_t age = now - s.bornMs;
+    if (age > FLOW_TTL_MS) return;
     lv_draw_line_dsc_t d;
     lv_draw_line_dsc_init(&d);
     d.color = dragon() ? DRG_FLOW : s_cRing;
-    d.width = 2;
-    d.opa = FLOW_OPA;
+    d.width = 3;
+    d.opa = (lv_opa_t)(FLOW_OPA - (FLOW_OPA * age / FLOW_TTL_MS));
+    if (d.opa < 3) return;
     lv_point_t pts[2] = { s.a, s.b };
     lv_canvas_draw_line(s_flowCanvas, pts, 2, &d);
+#else
+    (void)s;
+    (void)now;
+#endif
 }
 
 static void flow_redraw_all(void) {
+#if FLOW_CANVAS_ENABLED
     if (!s_flowCanvas) return;
+    const uint32_t now = lv_tick_get();
+    flow_prune(now);
     lv_canvas_fill_bg(s_flowCanvas, lv_color_black(), LV_OPA_TRANSP);
-    for (const FlowSeg &s : s_flow) flow_draw_seg(s);
+    for (uint16_t i = 0; i < s_flowCount; ++i) flow_draw_seg(flow_at(i), now);
+#endif
 }
 
 // =============================== grid ========================================
@@ -205,15 +294,14 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_width = 1;
         td.border_opa = 160;
         coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
         lv_draw_polygon(d, &td, tri, 3);
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
         return;
     }
 
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     coastline_draw(d, COAST_COLOR, 165, 2);
-    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
 
     // phosphor: concentric rings + crosshair
     lv_draw_arc_dsc_t ad;
@@ -233,6 +321,8 @@ static void grid_draw_cb(lv_event_t *e) {
     lv_point_t v1 = { s_cx, (lv_coord_t)(s_cy - 211) }, v2 = { s_cx, (lv_coord_t)(s_cy + 211) };
     lv_draw_line(d, &ll, &h1, &h2);
     lv_draw_line(d, &ll, &v1, &v2);
+
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
 }
 
 // =============================== sweep =======================================
@@ -245,7 +335,7 @@ static void sweep_draw_cb(lv_event_t *e) {
     lv_draw_line_dsc_t ld;
     lv_draw_line_dsc_init(&ld);
     ld.color = s_cRing;
-    ld.width = 5;
+    ld.width = 3;
     ld.round_start = 1;
     ld.round_end = 1;
     for (int i = SWEEP_TRAIL_STEPS; i >= 1; --i) {
@@ -269,7 +359,7 @@ static void sweep_draw_cb(lv_event_t *e) {
 
 static void wedge_bbox(float deg, lv_area_t *out) {
     lv_coord_t minx = s_cx, maxx = s_cx, miny = s_cy, maxy = s_cy;
-    const int steps = 10;
+    const int steps = 6;
     for (int i = 0; i <= steps; ++i) {
         const float a = deg - SWEEP_TRAIL_DEG * (float)i / (float)steps;
         const lv_point_t p = rim_point(a, (float)RADAR_R_OUTER_PX);
@@ -320,10 +410,16 @@ static void interp_step(void) {
 
 static void sweep_timer_cb(lv_timer_t *t) {
     (void)t;
-    if (++s_frameCtr % 3 == 0) interp_step();         // smooth glyph motion (~90 ms cadence)
+    const uint32_t now = lv_tick_get();
+    if (s_lastSweepTickMs == 0) s_lastSweepTickMs = now;
+    uint32_t elapsed = now - s_lastSweepTickMs;
+    s_lastSweepTickMs = now;
+    if (elapsed > SWEEP_MAX_ELAPSED_MS) elapsed = SWEEP_MAX_ELAPSED_MS; // slow instead of jumping after a stall
+
+    if (++s_frameCtr % 4 == 0) interp_step();         // smooth glyph motion (~80 ms cadence)
     if (dragon()) {
         // animate the dragon-ball waves (invalidate only the ball areas)
-        s_wavePhase += 0.05f;
+        s_wavePhase += (float)elapsed / 600.0f;
         if (s_wavePhase >= 1.0f) s_wavePhase -= 1.0f;
         if (!s_acLayer) return;
         int balls = 0;
@@ -339,8 +435,8 @@ static void sweep_timer_cb(lv_timer_t *t) {
     }
     if (!s_sweepEnabled) return;          // sweep disabled: glyph interpolation above still runs
     s_prevSweepDeg = s_sweepDeg;
-    s_sweepDeg += 360.0f * (float)SWEEP_FRAME_MS / (float)SWEEP_PERIOD_MS;
-    if (s_sweepDeg >= 360.0f) s_sweepDeg -= 360.0f;
+    s_sweepDeg += 360.0f * (float)elapsed / (float)SWEEP_PERIOD_MS;
+    while (s_sweepDeg >= 360.0f) s_sweepDeg -= 360.0f;
     if (!s_sweep) return;
     lv_area_t a, b, area;
     wedge_bbox(s_prevSweepDeg, &a);
@@ -354,18 +450,20 @@ static void sweep_timer_cb(lv_timer_t *t) {
 
 // =============================== aircraft ====================================
 static void draw_trail(lv_draw_ctx_t *d, const AcDraw &ac, lv_color_t col) {
-    const int n = (int)ac.trail.size();
+    const int n = (int)ac.trailCount;
     if (n < 2) return;
     lv_draw_line_dsc_t t;
     lv_draw_line_dsc_init(&t);
     t.color = col;
-    t.width = 2;
+    t.width = 1;
     for (int i = 1; i < n; ++i) {
-        t.opa = (lv_opa_t)(10 + 45 * i / n);
-        lv_point_t a = ac.trail[i - 1], b = ac.trail[i];
+        t.opa = (lv_opa_t)(6 + 28 * i / n);
+        lv_point_t a = ac.trail[i - 1].p, b = ac.trail[i].p;
         lv_draw_line(d, &t, &a, &b);
     }
 }
+
+static bool alert_style(const AcDraw &ac, const char **label, lv_color_t *color);
 
 static void draw_ball(lv_draw_ctx_t *d, const AcDraw &ac) {
     // emitted waves: several expanding rings (sonar-ping look)
@@ -383,7 +481,9 @@ static void draw_ball(lv_draw_ctx_t *d, const AcDraw &ac) {
     // the ball
     lv_draw_rect_dsc_t b;
     lv_draw_rect_dsc_init(&b);
-    b.bg_color = ac.emergency ? DRG_EMERG : DRG_BLIP;
+    lv_color_t alertCol = DRG_BLIP;
+    const bool alert = alert_style(ac, nullptr, &alertCol);
+    b.bg_color = alert ? alertCol : DRG_BLIP;
     b.bg_opa = LV_OPA_COVER;
     b.radius = LV_RADIUS_CIRCLE;
     b.border_color = lv_color_hex(0x7A5A00);
@@ -408,7 +508,9 @@ static void draw_offrange(lv_draw_ctx_t *d, const AcDraw &ac) {
     // small ball at the rim
     lv_draw_rect_dsc_t b;
     lv_draw_rect_dsc_init(&b);
-    b.bg_color = ac.emergency ? DRG_EMERG : DRG_BLIP;
+    lv_color_t alertCol = DRG_BLIP;
+    const bool alert = alert_style(ac, nullptr, &alertCol);
+    b.bg_color = alert ? alertCol : DRG_BLIP;
     b.bg_opa = LV_OPA_COVER;
     b.radius = LV_RADIUS_CIRCLE;
     lv_area_t r = { (lv_coord_t)(ac.pos.x - 5), (lv_coord_t)(ac.pos.y - 5),
@@ -428,6 +530,55 @@ static void draw_offrange(lv_draw_ctx_t *d, const AcDraw &ac) {
     lv_draw_polygon(d, &td, tri, 3);
 }
 
+static bool alert_style(const AcDraw &ac, const char **label, lv_color_t *color) {
+    if (ac.emergency) {
+        if (label) *label = "EMR";
+        if (color) *color = COL_EMERG;
+        return true;
+    }
+    if (ac.military) {
+        if (label) *label = "MIL";
+        if (color) *color = COL_MIL;
+        return true;
+    }
+    return false;
+}
+
+static void draw_alert_badge(lv_draw_ctx_t *d, const AcDraw &ac, bool dragonTheme) {
+    const char *txt = nullptr;
+    lv_color_t col = COL_EMERG;
+    if (!alert_style(ac, &txt, &col)) return;
+
+    lv_draw_arc_dsc_t ring;
+    lv_draw_arc_dsc_init(&ring);
+    ring.color = col;
+    ring.width = dragonTheme ? 3 : 2;
+    ring.opa = LV_OPA_COVER;
+    lv_draw_arc(d, &ring, &ac.pos, dragonTheme ? 20 : 17, 0, 360);
+    if (ac.emergency) lv_draw_arc(d, &ring, &ac.pos, dragonTheme ? 29 : 25, 0, 360);
+
+    lv_draw_rect_dsc_t chip;
+    lv_draw_rect_dsc_init(&chip);
+    chip.bg_color = lv_color_black();
+    chip.bg_opa = 190;
+    chip.border_color = col;
+    chip.border_opa = 210;
+    chip.border_width = 1;
+    chip.radius = 4;
+    lv_area_t ca = { (lv_coord_t)(ac.pos.x + 13), (lv_coord_t)(ac.pos.y - 32),
+                     (lv_coord_t)(ac.pos.x + 44), (lv_coord_t)(ac.pos.y - 15) };
+    lv_draw_rect(d, &chip, &ca);
+
+    lv_draw_label_dsc_t lb;
+    lv_draw_label_dsc_init(&lb);
+    lb.font = &lv_font_montserrat_12;
+    lb.color = col;
+    lb.opa = LV_OPA_COVER;
+    lv_area_t la = { (lv_coord_t)(ca.x1 + 4), (lv_coord_t)(ca.y1 + 2),
+                     (lv_coord_t)(ca.x2 + 18), (lv_coord_t)(ca.y2 + 2) };
+    lv_draw_label(d, &lb, &la, txt, NULL);
+}
+
 static void ac_draw_cb(lv_event_t *e) {
     lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
     const bool drg = dragon();
@@ -439,6 +590,7 @@ static void ac_draw_cb(lv_event_t *e) {
                 if (balls >= DRAGON_BALLS) continue;   // up to 7 in-range balls
                 draw_trail(d, ac, DRG_FLOW);
                 draw_ball(d, ac);
+                draw_alert_badge(d, ac, true);
                 balls++;
             } else {
                 if (arrows >= DRAGON_ARROWS) continue;  // up to 8 off-range arrows
@@ -462,12 +614,7 @@ static void ac_draw_cb(lv_event_t *e) {
             g.bg_color = ac.color;
             g.bg_opa = LV_OPA_COVER;
             lv_draw_polygon(d, &g, pts, 4);
-            if (ac.emergency) {
-                lv_draw_arc_dsc_t h;
-                lv_draw_arc_dsc_init(&h);
-                h.color = COL_EMERG; h.width = 2; h.opa = 200;
-                lv_draw_arc(d, &h, &ac.pos, 16, 0, 360);
-            }
+            draw_alert_badge(d, ac, false);
         }
 
         // selection ring(s)
@@ -481,7 +628,8 @@ static void ac_draw_cb(lv_event_t *e) {
                 lv_draw_arc(d, &sr, &ac.pos, 15, 0, 360);
                 lv_draw_arc(d, &sr, &ac.pos, 23, 0, 360);
             } else {
-                sr.color = ac.emergency ? COL_EMERG : s_cInk;
+                lv_color_t alertCol = s_cInk;
+                sr.color = alert_style(ac, nullptr, &alertCol) ? alertCol : s_cInk;
                 lv_draw_arc(d, &sr, &ac.pos, 19, 0, 360);
             }
         }
@@ -491,7 +639,9 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_draw_label_dsc_t lc;
             lv_draw_label_dsc_init(&lc);
             lc.font = &lv_font_montserrat_14;
-            lc.color = s_cInk;
+            lv_color_t alertCol = s_cInk;
+            const bool alert = alert_style(ac, nullptr, &alertCol);
+            lc.color = alert ? alertCol : s_cInk;
             lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 14),
                              (lv_coord_t)(ac.pos.x + 142), (lv_coord_t)(ac.pos.y + 2) };
             if (ac.call[0]) lv_draw_label(d, &lc, &a1, ac.call, NULL);
@@ -534,6 +684,27 @@ static void pulse_anim_cb(void *obj, int32_t v) {
     lv_obj_set_style_border_opa(o, (lv_opa_t)(220 - v * 220 / 100), 0);
 }
 
+static void start_pulse_anim(void) {
+    if (!s_pulse || s_pulseAnimRunning) return;
+    lv_anim_init(&s_pulseAnim);
+    lv_anim_set_var(&s_pulseAnim, s_pulse);
+    lv_anim_set_exec_cb(&s_pulseAnim, pulse_anim_cb);
+    lv_anim_set_values(&s_pulseAnim, 0, 100);
+    lv_anim_set_time(&s_pulseAnim, 2600);
+    lv_anim_set_repeat_count(&s_pulseAnim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_start(&s_pulseAnim);
+    s_pulseAnimRunning = true;
+}
+
+static void stop_pulse_anim(void) {
+    if (!s_pulse) return;
+    lv_anim_del(s_pulse, pulse_anim_cb);
+    s_pulseAnimRunning = false;
+    lv_obj_set_size(s_pulse, 12, 12);
+    lv_obj_center(s_pulse);
+    lv_obj_set_style_border_opa(s_pulse, LV_OPA_COVER, 0);
+}
+
 namespace radar {
 
 void setTheme(int t) {
@@ -565,11 +736,12 @@ void setTheme(int t) {
     for (int i = 0; i < 4; ++i) show(s_rose[i], !drg);   // hide compass in DBZ
     show(s_rangeLbl, !drg && s_rangeLblVisible);
     show(s_centerDot, !drg);                             // dragon draws an orange triangle instead
-    show(s_pulse, !drg);
+    show(s_pulse, !drg && s_sweepEnabled);
+    if (s_sweepEnabled && !drg) start_pulse_anim();
+    else stop_pulse_anim();
 
     // retint the persistent chrome objects for the active palette
-    if (s_rose[0]) lv_obj_set_style_text_color(s_rose[0], s_cInk, 0);
-    for (int i = 1; i < 4; ++i) if (s_rose[i]) lv_obj_set_style_text_color(s_rose[i], s_cSoft, 0);
+    for (int i = 0; i < 4; ++i) if (s_rose[i]) lv_obj_set_style_text_color(s_rose[i], s_cInk, 0);
     if (s_centerDot) lv_obj_set_style_bg_color(s_centerDot, s_cInk, 0);
     if (s_pulse)     lv_obj_set_style_border_color(s_pulse, s_cInk, 0);
     if (s_rangeLbl)  lv_obj_set_style_text_color(s_rangeLbl, s_cRing, 0);
@@ -590,6 +762,11 @@ void setSweepEnabled(bool on) {
         show(s_sweep, on);
         if (!on) lv_obj_invalidate(s_sweep);   // clear any wedge currently painted
     }
+    if (s_pulse) {
+        show(s_pulse, on && !dragon());
+        if (on && !dragon()) start_pulse_anim();
+        else stop_pulse_anim();
+    }
 }
 bool sweepEnabled() { return s_sweepEnabled; }
 
@@ -599,6 +776,22 @@ void setAirportsEnabled(bool on) {
 }
 bool airportsEnabled() { return s_airportsEnabled; }
 
+void setGroundAircraftEnabled(bool on) {
+    s_groundAircraftEnabled = on;
+    if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+bool groundAircraftEnabled() { return s_groundAircraftEnabled; }
+
+void setAircraftLayerVisible(bool on) {
+    show(s_acLayer, on);
+}
+
+void setMapPanOffset(int dx, int dy) {
+    coastline_set_offset((lv_coord_t)dx, (lv_coord_t)dy);
+    airports_set_offset((lv_coord_t)dx, (lv_coord_t)dy);
+    if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
+}
+
 void init(void *lv_parent) {
     lv_obj_t *parent = (lv_obj_t *)lv_parent;
     s_parent = parent;
@@ -606,13 +799,21 @@ void init(void *lv_parent) {
     s_cy = SCREEN_CY;
     s_acs.clear();
     s_trails.clear();
-    s_flow.clear();
+    flow_clear();
     s_selHex.clear();
-    s_flowRedrawCtr = 0;
+    s_acs.reserve(ADSB_MAX_AIRCRAFT);
+    s_trails.reserve(ADSB_MAX_AIRCRAFT);
 
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
-    if (!s_flowBuf) {
+    if (FLOW_CANVAS_ENABLED && !s_flow) {
+#if defined(ESP_PLATFORM)
+        s_flow = (FlowSeg *)heap_caps_malloc(sizeof(FlowSeg) * FLOW_MAX, MALLOC_CAP_SPIRAM);
+#else
+        s_flow = (FlowSeg *)malloc(sizeof(FlowSeg) * FLOW_MAX);
+#endif
+    }
+    if (FLOW_CANVAS_ENABLED && !s_flowBuf) {
         const size_t sz = LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(SCREEN_W, SCREEN_H);
 #if defined(ESP_PLATFORM)
         s_flowBuf = (lv_color_t *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
@@ -620,22 +821,27 @@ void init(void *lv_parent) {
         s_flowBuf = (lv_color_t *)malloc(sz);
 #endif
     }
-    s_flowCanvas = lv_canvas_create(parent);
-    lv_obj_clear_flag(s_flowCanvas, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    if (s_flowBuf) {
-        lv_canvas_set_buffer(s_flowCanvas, s_flowBuf, SCREEN_W, SCREEN_H, LV_IMG_CF_TRUE_COLOR_ALPHA);
-        lv_canvas_fill_bg(s_flowCanvas, lv_color_black(), LV_OPA_TRANSP);
+    if (FLOW_CANVAS_ENABLED) {
+        s_flowCanvas = lv_canvas_create(parent);
+        lv_obj_clear_flag(s_flowCanvas, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        if (s_flowBuf) {
+            lv_canvas_set_buffer(s_flowCanvas, s_flowBuf, SCREEN_W, SCREEN_H, LV_IMG_CF_TRUE_COLOR_ALPHA);
+            lv_canvas_fill_bg(s_flowCanvas, lv_color_black(), LV_OPA_TRANSP);
+        }
+        lv_obj_center(s_flowCanvas);
+    } else {
+        s_flowCanvas = nullptr;
     }
-    lv_obj_center(s_flowCanvas);
 
     s_gridLayer = make_layer(parent, grid_draw_cb);
+    if (s_flowCanvas) lv_obj_move_foreground(s_flowCanvas);
     s_sweep     = make_layer(parent, sweep_draw_cb);
     s_acLayer   = make_layer(parent, ac_draw_cb);
 
-    s_rose[0] = make_label(parent, "N", &lv_font_montserrat_28, COL_INK,  LV_ALIGN_TOP_MID,    0, 12);
-    s_rose[1] = make_label(parent, "S", &lv_font_montserrat_16, COL_SOFT, LV_ALIGN_BOTTOM_MID, 0, -12);
-    s_rose[2] = make_label(parent, "E", &lv_font_montserrat_16, COL_SOFT, LV_ALIGN_RIGHT_MID, -12, 0);
-    s_rose[3] = make_label(parent, "W", &lv_font_montserrat_16, COL_SOFT, LV_ALIGN_LEFT_MID,   12, 0);
+    s_rose[0] = make_label(parent, "N", &lv_font_montserrat_28, COL_INK, LV_ALIGN_TOP_MID,    0, 12);
+    s_rose[1] = make_label(parent, "S", &lv_font_montserrat_28, COL_INK, LV_ALIGN_BOTTOM_MID, 0, -12);
+    s_rose[2] = make_label(parent, "E", &lv_font_montserrat_28, COL_INK, LV_ALIGN_RIGHT_MID, -12, 0);
+    s_rose[3] = make_label(parent, "W", &lv_font_montserrat_28, COL_INK, LV_ALIGN_LEFT_MID,   12, 0);
 
     char rng[16];
     snprintf(rng, sizeof(rng), "%.0f km", (double)RANGE_KM_DEFAULT);
@@ -651,14 +857,7 @@ void init(void *lv_parent) {
     lv_obj_set_style_border_color(s_pulse, COL_INK, 0);
     lv_obj_set_style_border_width(s_pulse, 2, 0);
     lv_obj_clear_flag(s_pulse, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, s_pulse);
-    lv_anim_set_exec_cb(&a, pulse_anim_cb);
-    lv_anim_set_values(&a, 0, 100);
-    lv_anim_set_time(&a, 2600);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&a);
+    start_pulse_anim();
 
     s_centerDot = lv_obj_create(parent);
     lv_obj_remove_style_all(s_centerDot);
@@ -671,16 +870,22 @@ void init(void *lv_parent) {
 
     s_sweepDeg = 0.0f;
     s_prevSweepDeg = 0.0f;
+    s_lastSweepTickMs = lv_tick_get();
     if (!s_timer) s_timer = lv_timer_create(sweep_timer_cb, SWEEP_FRAME_MS, nullptr);
+    else lv_timer_set_period(s_timer, SWEEP_FRAME_MS);
 
     setTheme(s_theme);
 }
 
 void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
-    std::vector<AcDraw> out;
+    static std::vector<AcDraw> out;
+    static std::vector<HexKey> present;
+    out.clear();
+    present.clear();
     out.reserve(aircraft.size());
-    std::set<std::string> present;
+    present.reserve(aircraft.size());
     const float R = (float)RADAR_R_OUTER_PX;
+    const uint32_t now = lv_tick_get();
 
     // Reproject the coastline only when the scope geometry actually changes (home
     // moved or range zoomed) — never per frame. Then repaint the static chrome layer.
@@ -695,31 +900,34 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
             // Scope scale/center changed: old trails were plotted at the previous
             // projection and would be wrong now — drop them and clear the flow layer.
             s_trails.clear();
-            s_flow.clear();
+            flow_clear();
             flow_redraw_all();
         }
     }
 
-    std::map<std::string, lv_point_t> prevPos;        // smooth-motion: glide starts here
-    for (const AcDraw &a : s_acs) prevPos[a.hex] = a.pos;
-
     for (const Aircraft &ac : aircraft) {
+        if (ac.onGround && !s_groundAircraftEnabled) continue;     // parked/taxiing contacts can obscure airport labels
+
         const double distKm = geo::haversineKm(s.homeLat, s.homeLon, ac.lat, ac.lon);
         const double brg = geo::bearingDeg(s.homeLat, s.homeLon, ac.lat, ac.lon);
         const geo::Point p = geo::projectToScreen(distKm, brg, s.rangeKm, s_cx, s_cy, R, s.rotationDeg);
 
         AcDraw d;
+        d.trailCount = 0;
         lv_point_t target;
         target.x = (lv_coord_t)lroundf(p.x);
         target.y = (lv_coord_t)lroundf(p.y);
         d.to = target;
         {
-            auto pit = prevPos.find(std::string(ac.hex.c_str()));
-            if (pit != prevPos.end()) {
-                const long dx = (long)target.x - pit->second.x;
-                const long dy = (long)target.y - pit->second.y;
-                d.from = (dx * dx + dy * dy > 120L * 120L) ? target : pit->second;  // snap if it jumped
-            } else d.from = target;                                                  // new contact: appear in place
+            const AcDraw *prev = nullptr;
+            for (const AcDraw &old : s_acs) {
+                if (strcmp(old.hex, ac.hex) == 0) { prev = &old; break; }
+            }
+            if (prev) {
+                const long dx = (long)target.x - prev->pos.x;
+                const long dy = (long)target.y - prev->pos.y;
+                d.from = (dx * dx + dy * dy > 120L * 120L) ? target : prev->pos;  // snap if it jumped
+            } else d.from = target;                                               // new contact: appear in place
         }
 #if MOTION_INTERP
         d.pos = d.from;                  // begin the glide at the previous position
@@ -731,56 +939,81 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         d.track = ac.track;
         d.color = alt_color(ac.altBaro, ac.onGround);
         d.emergency = acIsEmergency(ac.squawk);
-        snprintf(d.hex,  sizeof(d.hex),  "%s", ac.hex.c_str());
-        snprintf(d.call, sizeof(d.call), "%s", ac.flight.c_str());
-        snprintf(d.type, sizeof(d.type), "%s", ac.type.c_str());
+        d.military = ac.military;
+        snprintf(d.hex,  sizeof(d.hex),  "%s", ac.hex);
+        snprintf(d.call, sizeof(d.call), "%s", ac.flight);
+        snprintf(d.type, sizeof(d.type), "%s", ac.type);
         d.altFt = ac.altBaro;
         d.onGround = ac.onGround;
         d.vsFpm = ac.baroRate;
         d.gsKt = ac.gs;
         d.distKm = (float)distKm;
         d.bearingDeg = (float)brg;
+        d.lat = ac.lat;
+        d.lon = ac.lon;
         d.squawk = ac.squawk;
         if (ac.onGround) snprintf(d.altTxt, sizeof(d.altTxt), "GND");
         else             snprintf(d.altTxt, sizeof(d.altTxt), "%.0f ft", (double)ac.altBaro);
 
-        const std::string key = ac.hex.c_str();
-        present.insert(key);
+        HexKey keyBuf{};
+        snprintf(keyBuf.data(), keyBuf.size(), "%s", ac.hex);
+        present.push_back(keyBuf);
         if (d.inRange) {
-            std::vector<lv_point_t> &hist = s_trails[key];
-            const bool moved = hist.empty() ||
-                               abs((int)hist.back().x - (int)target.x) > 0 ||
-                               abs((int)hist.back().y - (int)target.y) > 0;
-            if (moved) {
-                if (!hist.empty()) {
-                    FlowSeg seg = { hist.back(), target };
-                    s_flow.push_back(seg);
-                    if ((int)s_flow.size() > FLOW_MAX) s_flow.pop_front();
-                    flow_draw_seg(seg);
-                }
-                hist.push_back(target);
-                if ((int)hist.size() > TRAIL_MAX) hist.erase(hist.begin());
+            if (s_trails.capacity() < (size_t)ADSB_MAX_AIRCRAFT) s_trails.reserve(ADSB_MAX_AIRCRAFT);
+            TrailTrack *hist = find_or_add_trail(ac.hex);
+            hist->seen = true;
+
+            uint8_t kept = 0;
+            for (uint8_t i = 0; i < hist->count; ++i) {
+                if ((uint32_t)(now - hist->pts[i].bornMs) <= TRAIL_TTL_MS) hist->pts[kept++] = hist->pts[i];
             }
-            d.trail = hist;
+            hist->count = kept;
+
+            const bool moved = hist->count == 0 ||
+                               abs((int)hist->pts[hist->count - 1].p.x - (int)target.x) > 0 ||
+                               abs((int)hist->pts[hist->count - 1].p.y - (int)target.y) > 0;
+            if (moved) {
+#if FLOW_CANVAS_ENABLED
+                if (hist->count > 0) {
+                    FlowSeg seg = { hist->pts[hist->count - 1].p, target, now };
+                    flow_push(seg);
+                    flow_draw_seg(seg, now);
+                }
+#endif
+                if (hist->count >= TRAIL_MAX) {
+                    memmove(&hist->pts[0], &hist->pts[1], sizeof(TrailPt) * (TRAIL_MAX - 1));
+                    hist->count = TRAIL_MAX - 1;
+                }
+                hist->pts[hist->count++] = { target, now };
+            }
+            d.trailCount = hist->count;
+            for (uint8_t i = 0; i < d.trailCount; ++i) {
+                d.trail[i] = hist->pts[i];
+            }
+        } else {
+            if (TrailTrack *hist = find_trail(ac.hex)) hist->seen = false;
         }
         out.push_back(std::move(d));
     }
 
     for (auto it = s_trails.begin(); it != s_trails.end();) {
-        if (present.find(it->first) == present.end()) it = s_trails.erase(it);
+        if (!it->seen || !contains_hex(present, it->hex)) it = s_trails.erase(it);
         else ++it;
     }
-    if (!s_selHex.empty() && present.find(s_selHex) == present.end()) s_selHex.clear();
+    if (!s_selHex.empty() && !contains_hex(present, s_selHex.c_str())) s_selHex.clear();
 
     // nearest first (the dragon balls + the list); cap to keep work bounded
     std::sort(out.begin(), out.end(),
               [](const AcDraw &a, const AcDraw &b) { return a.distKm < b.distKm; });
     if (out.size() > 20) out.resize(20);
 
-    if (++s_flowRedrawCtr >= FLOW_REDRAW_EVERY) {
-        s_flowRedrawCtr = 0;
+#if FLOW_CANVAS_ENABLED
+    flow_prune(now);
+    if (now - s_lastFlowRefreshMs > 30000UL) {
+        s_lastFlowRefreshMs = now;
         flow_redraw_all();
     }
+#endif
 
     if (s_rangeLbl) {                                 // keep the range label in sync with settings
         char r[16];
@@ -788,14 +1021,14 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         lv_label_set_text(s_rangeLbl, r);
     }
 
-    const uint32_t now = lv_tick_get();              // measure actual cadence for the glide clock
+    // measure actual cadence for the glide clock
     s_pollMs = (s_lastUpdateMs && now > s_lastUpdateMs) ? (now - s_lastUpdateMs) : (uint32_t)POLL_INTERVAL_MS;
     if (s_pollMs < 400)  s_pollMs = 400;
     if (s_pollMs > 8000) s_pollMs = 8000;
     s_lastUpdateMs = now;
     s_animStartMs  = now;
 
-    s_acs = std::move(out);
+    s_acs.swap(out);
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
 
@@ -824,7 +1057,8 @@ static void fill_info(const AcDraw &a, AcInfo &out) {
     out.altFt = a.altFt; out.onGround = a.onGround;
     out.vsFpm = a.vsFpm; out.gsKt = a.gsKt;
     out.distKm = a.distKm; out.bearingDeg = a.bearingDeg;
-    out.squawk = a.squawk; out.emergency = a.emergency;
+    out.lat = a.lat; out.lon = a.lon;
+    out.squawk = a.squawk; out.emergency = a.emergency; out.military = a.military;
 }
 
 void select(int idx) {
@@ -845,6 +1079,24 @@ int count() { return (int)s_acs.size(); }
 int countInRange() {
     int n = 0;
     for (const AcDraw &a : s_acs) if (a.inRange) ++n;
+    return n;
+}
+
+int alertCountInRange() {
+    int n = 0;
+    for (const AcDraw &a : s_acs) if (a.inRange && (a.emergency || a.military)) ++n;
+    return n;
+}
+
+int emergencyCountInRange() {
+    int n = 0;
+    for (const AcDraw &a : s_acs) if (a.inRange && a.emergency) ++n;
+    return n;
+}
+
+int militaryCountInRange() {
+    int n = 0;
+    for (const AcDraw &a : s_acs) if (a.inRange && a.military) ++n;
     return n;
 }
 

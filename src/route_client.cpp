@@ -1,97 +1,41 @@
-// Route lookup via adsbdb.com (free, no API key): GET /v0/callsign/{callsign}.
-// Returns origin/destination city names (English). Device-only.
+// Route lookup via the adsb.lol tar1090-compatible routeset API.
 #include "route_client.h"
 #include "config.h"
+#include "net_guard.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <Preferences.h>
+#include <esp_heap_caps.h>
 #include <string.h>
-#include <time.h>   // route-cache TTL
+#include <math.h>
 
-#define ROUTE_CACHE_MAX 200   // wrap the cache before it can crowd NVS
+struct RoutePsramAlloc : ArduinoJson::Allocator {
+    void *allocate(size_t n) override { return heap_caps_malloc(n, MALLOC_CAP_SPIRAM); }
+    void deallocate(void *p) override { heap_caps_free(p); }
+    void *reallocate(void *p, size_t n) override { return heap_caps_realloc(p, n, MALLOC_CAP_SPIRAM); }
+};
+static RoutePsramAlloc s_jsonPsram;
 
-// strip spaces -> a valid NVS key (callsigns are <= 8 chars)
-static void route_key(const char *callsign, char *out, size_t on) {
-    size_t j = 0;
-    for (const char *p = callsign; *p && j < on - 1; ++p)
-        if (*p != ' ') out[j++] = *p;
-    out[j] = 0;
-}
-
-#define ROUTE_FMT_VER 2   // bump to invalidate cached routes when the label format changes
-
-void route_cache_begin() {
-    Preferences p;
-    if (!p.begin("routes", false)) return;
-    if (p.getUChar("__v", 0) != ROUTE_FMT_VER) { p.clear(); p.putUChar("__v", ROUTE_FMT_VER); }
-    p.end();
-}
-
-bool route_cache_get(const char *callsign, char *from, size_t fn, char *to, size_t tn) {
-    if (fn) from[0] = 0;
-    if (tn) to[0] = 0;
-    if (!callsign || !callsign[0]) return false;
-    char key[12];
-    route_key(callsign, key, sizeof(key));
-    if (!key[0]) return false;
-    Preferences p;
-    if (!p.begin("routes", true)) return false;
-    String v = p.getString(key, "");     // stored as "epoch|from|to"
-    p.end();
-    if (v.length() == 0) return false;
-    const int b1 = v.indexOf('|');
-    if (b1 < 0) return false;
-    const uint32_t ts = (uint32_t)v.substring(0, b1).toInt();
-    const String rest = v.substring(b1 + 1);
-    const int b2 = rest.indexOf('|');
-    if (b2 < 0) return false;
-    const uint32_t now = (uint32_t)time(nullptr);    // expire stale routes (reused callsigns)
-    if (now > 1700000000UL && ts > 1700000000UL && (now - ts) > 86400UL) return false;  // 24 h TTL
-    snprintf(from, fn, "%s", rest.substring(0, b2).c_str());
-    snprintf(to, tn, "%s", rest.substring(b2 + 1).c_str());
+static bool append_code(char *out, size_t n, const char *code) {
+    if (!out || n == 0 || !code || !code[0]) return false;
+    const size_t used = strlen(out);
+    if (used > 0) {
+        if (used + 4 >= n) return false;
+        strncat(out, " -> ", n - used - 1);
+    }
+    const size_t nowUsed = strlen(out);
+    strncat(out, code, n - nowUsed - 1);
     return true;
 }
 
-void route_cache_put(const char *callsign, const char *from, const char *to) {
-    if (!callsign || !callsign[0]) return;
-    char key[12];
-    route_key(callsign, key, sizeof(key));
-    if (!key[0]) return;
-    Preferences p;
-    if (!p.begin("routes", false)) return;
-    int n = p.getInt("__n", 0);
-    if (n >= ROUTE_CACHE_MAX) { p.clear(); n = 0; }   // wrap to bound NVS usage
-    String v = String((uint32_t)time(nullptr)) + "|" + String(from ? from : "") + "|" + String(to ? to : "");
-    if (p.putString(key, v) > 0) p.putInt("__n", n + 1);
-    p.end();
-}
-
-// Most recognizable short airport label: a cleaned-up name ("Teesside", "Palma de
-// Mallorca", "London Heathrow"), falling back to the municipality, then the IATA code.
-static void pick_airport(JsonObjectConst ap, char *out, size_t n) {
-    String s = (const char *)(ap["name"] | "");
-    s.replace(" International Airport", "");
-    s.replace(" Regional Airport", "");
-    s.replace(" Airport", "");
-    s.replace(" International", "");
-    s.trim();
-    if (s.length() == 0 || s.length() > 18) {           // name missing or too long -> municipality/IATA
-        const char *muni = ap["municipality"] | "";
-        const char *iata = ap["iata_code"] | "";
-        snprintf(out, n, "%s", muni[0] ? muni : iata);
-        return;
-    }
-    snprintf(out, n, "%s", s.c_str());
-}
-
-bool route_fetch(const char *callsign, char *from, size_t fn, char *to, size_t tn) {
+bool route_fetch(const char *callsign, double lat, double lon, char *from, size_t fn, char *to, size_t tn) {
     if (fn) from[0] = 0;
     if (tn) to[0] = 0;
     if (!callsign || !callsign[0] || WiFi.status() != WL_CONNECTED) return false;
+    if (!isfinite(lat) || !isfinite(lon) || (lat == 0.0 && lon == 0.0)) return false;
+    if (!tls_heap_ok("route")) return false;
 
-    // strip spaces from the callsign
     char cs[12];
     size_t j = 0;
     for (const char *p = callsign; *p && j < sizeof(cs) - 1; ++p)
@@ -99,39 +43,64 @@ bool route_fetch(const char *callsign, char *from, size_t fn, char *to, size_t t
     cs[j] = 0;
     if (j == 0) return false;
 
-    char url[96];
-    snprintf(url, sizeof(url), "https://api.adsbdb.com/v0/callsign/%s", cs);
+    char body[96];
+    snprintf(body, sizeof(body), "{\"planes\":[{\"callsign\":\"%s\",\"lat\":%.5f,\"lng\":%.5f}]}", cs, lat, lon);
 
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
     http.setReuse(false);
-    http.setConnectTimeout(3000);   // short: runs on the feed task, don't stall the live poll
+    http.setConnectTimeout(3000);
     http.setTimeout(6000);
-    if (!http.begin(client, url)) return false;
+    if (!http.begin(client, "https://api.adsb.lol/api/0/routeset")) return false;
     http.addHeader("User-Agent", ADSB_USER_AGENT);
+    http.addHeader("Accept", "application/json, text/javascript, */*; q=0.01");
+    http.addHeader("Content-Type", "application/json; charset=utf-8");
+    http.addHeader("Origin", "https://adsb.lol");
+    http.addHeader("Referer", "https://adsb.lol/");
 
-    const int code = http.GET();
-    if (code != 200) { http.end(); return false; }
+    int code = http.POST((uint8_t *)body, strlen(body));
+    if (code != 200 || http.getSize() == 0) {
+        http.end();
+        return false;
+    }
 
-    JsonDocument filter;
-    filter["response"]["flightroute"]["origin"]["municipality"] = true;
-    filter["response"]["flightroute"]["origin"]["iata_code"] = true;
-    filter["response"]["flightroute"]["origin"]["name"] = true;
-    filter["response"]["flightroute"]["destination"]["municipality"] = true;
-    filter["response"]["flightroute"]["destination"]["iata_code"] = true;
-    filter["response"]["flightroute"]["destination"]["name"] = true;
+    JsonDocument filter(&s_jsonPsram);
+    filter[0]["plausible"] = true;
+    filter[0]["_airports"][0]["iata"] = true;
+    filter[0]["_airports"][0]["icao"] = true;
+    filter[0]["_airports"][1]["iata"] = true;
+    filter[0]["_airports"][1]["icao"] = true;
+    filter[0]["_airports"][2]["iata"] = true;
+    filter[0]["_airports"][2]["icao"] = true;
+    filter[0]["_airports"][3]["iata"] = true;
+    filter[0]["_airports"][3]["icao"] = true;
 
-    JsonDocument doc;
+    JsonDocument doc(&s_jsonPsram);
     DeserializationError err = deserializeJson(doc, http.getStream(),
                                                DeserializationOption::Filter(filter));
     http.end();
     if (err) return false;
 
-    JsonObjectConst fr = doc["response"]["flightroute"].as<JsonObjectConst>();
-    if (fr.isNull()) return false;   // "unknown callsign" etc.
+    JsonObjectConst route = doc[0].as<JsonObjectConst>();
+    if (route.isNull()) return false;
+    const bool questionable = route["plausible"].is<bool>() && route["plausible"].as<bool>() == false;
 
-    pick_airport(fr["origin"].as<JsonObjectConst>(), from, fn);
-    pick_airport(fr["destination"].as<JsonObjectConst>(), to, tn);
-    return (from[0] || to[0]);
+    JsonArrayConst airports = route["_airports"].as<JsonArrayConst>();
+    if (airports.isNull() || airports.size() < 2) return false;
+
+    bool wroteFrom = false;
+    to[0] = 0;
+    for (JsonObjectConst ap : airports) {
+        const char *codeText = ap["iata"] | "";
+        if (!codeText[0]) codeText = ap["icao"] | "";
+        if (!codeText[0]) continue;
+        if (!wroteFrom) {
+            snprintf(from, fn, "%s%s", questionable ? "?? " : "", codeText);
+            wroteFrom = true;
+        } else {
+            append_code(to, tn, codeText);
+        }
+    }
+    return from[0] && to[0];
 }

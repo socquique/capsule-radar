@@ -1,19 +1,12 @@
 #pragma once
 // Aircraft data model + small presentation helpers.
-#if defined(ARDUINO)
-  #include <Arduino.h>
-#else
-  // Native build (SDL simulator): minimal shim so the data model compiles off-device.
-  #include <string>
-  #include <cstdint>
-  using String = std::string;
-#endif
+#include <math.h>
 #include <stdint.h>
 
 struct Aircraft {
-    String   hex;            // ICAO 24-bit id (stable key)
-    String   flight;         // callsign
-    String   type;           // e.g. "B738" (when available)
+    char     hex[8] = "";     // ICAO 24-bit id (stable key)
+    char     flight[12] = ""; // callsign
+    char     type[8] = "";    // e.g. "B738" (when available)
     double   lat = 0, lon = 0;
     float    altBaro = 0;    // ft (NAN if on ground)
     bool     onGround = false;

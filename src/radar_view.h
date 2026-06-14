@@ -31,8 +31,11 @@ struct AcInfo {
     float gsKt;         // NaN if unknown
     float distKm;
     float bearingDeg;
+    double lat;
+    double lon;
     int   squawk;       // -1 if unknown
     bool  emergency;
+    bool  military;
 };
 
 namespace radar {
@@ -53,6 +56,9 @@ bool selected(AcInfo& out);                 // false if nothing selected/visible
 // Snapshot access for the list / stats views.
 int  count();
 int  countInRange();                        // aircraft within the display range (for the HUD)
+int  alertCountInRange();                   // emergency or military aircraft within display range
+int  emergencyCountInRange();               // emergency squawks within display range
+int  militaryCountInRange();                // military aircraft within display range
 bool info(int idx, AcInfo& out);
 
 // Sweep self-animates via an internal timer; kept for API compatibility.
@@ -64,9 +70,13 @@ int  theme();
 void cycleTheme();
 void setThemeChangedCb(void (*cb)(int theme));   // called when the theme changes (for persistence)
 void setRangeLabelVisible(bool v);               // hide the built-in range label (UI shows its own)
-void setSweepEnabled(bool on);                   // show/hide the rotating sweep line
+void setSweepEnabled(bool on);                   // show/hide radar animations: sweep + center pulse
 bool sweepEnabled();
 void setAirportsEnabled(bool on);                // show/hide airport markers on the scope
 bool airportsEnabled();
+void setGroundAircraftEnabled(bool on);          // show/hide aircraft reported on ground
+bool groundAircraftEnabled();
+void setAircraftLayerVisible(bool on);           // temporarily hide aircraft while panning the map
+void setMapPanOffset(int dx, int dy);            // lightweight visual offset while dragging the map
 
 } // namespace radar

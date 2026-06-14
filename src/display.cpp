@@ -8,6 +8,7 @@
 #include "radar_view.h"
 #include "ui.h"
 #include "touch_cst9217.h"
+#include "app_log.h"
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -21,7 +22,7 @@ static Arduino_DataBus *s_bus = nullptr;
 static Arduino_CO5300  *s_gfx = nullptr;
 
 // --- LVGL plumbing -----------------------------------------------------------
-#define LVGL_BUF_LINES 40    // partial draw-buffer height (lines); kept in fast internal RAM
+#define LVGL_BUF_LINES 20    // partial draw-buffer height (lines); kept in fast internal RAM for TLS headroom
 static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t      s_disp_drv;
 static lv_indev_drv_t     s_indev_drv;
@@ -70,19 +71,19 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
 namespace display {
 
 bool begin() {
-    Serial.println("[display] init CO5300 QSPI...");
+    app_log_println("[display] init CO5300 QSPI...");
     s_bus = new Arduino_ESP32QSPI(PIN_LCD_CS, PIN_LCD_SCLK,
                                   PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3);
     s_gfx = new Arduino_CO5300(s_bus, PIN_LCD_RST, 0 /*rotation*/,
                                SCREEN_W, SCREEN_H,
                                LCD_COL_OFFSET, LCD_ROW_OFFSET, 0, 0);
     if (!s_gfx->begin(LCD_QSPI_HZ)) {
-        Serial.println("[display] gfx->begin() FAILED");
+        app_log_println("[display] gfx->begin() FAILED");
         return false;
     }
     s_gfx->fillScreen(RGB565_BLACK);
     s_gfx->setBrightness(BRIGHTNESS_DEFAULT);
-    Serial.println("[display] panel up; init LVGL...");
+    app_log_println("[display] panel up; init LVGL...");
 
     lv_init();
 
@@ -93,7 +94,7 @@ bool begin() {
     s_buf1 = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     s_buf2 = nullptr;
     if (!s_buf1) {
-        Serial.println("[display] internal draw buffer failed; falling back to PSRAM");
+        app_log_println("[display] internal draw buffer failed; falling back to PSRAM");
         s_buf1 = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
     }
     lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, buf_px);
@@ -112,12 +113,12 @@ bool begin() {
         s_indev_drv.type = LV_INDEV_TYPE_POINTER;
         s_indev_drv.read_cb = touch_read_cb;
         lv_indev_drv_register(&s_indev_drv);
-        Serial.println("[display] CST9217 touch registered");
+        app_log_println("[display] CST9217 touch registered");
     }
 
-    Serial.printf("[display] PSRAM free: %u KB\n", (unsigned)(ESP.getFreePsram() / 1024));
+    app_log_printf("[display] PSRAM free: %u KB\n", (unsigned)(ESP.getFreePsram() / 1024));
     ui_create();                   // M3: radar/list/stats views + tap-to-inspect
-    Serial.println("[display] LVGL ready");
+    app_log_println("[display] LVGL ready");
     return true;
 }
 

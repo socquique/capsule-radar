@@ -10,16 +10,22 @@ static char s_want[12]     = "";   // callsign the UI asked about
 static char s_doneCall[12] = "";   // callsign the stored result belongs to
 static char s_from[40]     = "";
 static char s_to[40]       = "";
+static double s_wantLat = 0.0;
+static double s_wantLon = 0.0;
 
-void route_request(const char *callsign) {
+void route_request(const char *callsign, double lat, double lon) {
     std::lock_guard<std::mutex> g(s_m);
     snprintf(s_want, sizeof(s_want), "%s", callsign ? callsign : "");
+    s_wantLat = lat;
+    s_wantLon = lon;
 }
 
-bool route_pending(char *callOut, size_t n) {
+bool route_pending(char *callOut, size_t n, double *latOut, double *lonOut) {
     std::lock_guard<std::mutex> g(s_m);
     if (s_want[0] && strcmp(s_want, s_doneCall) != 0) {
         snprintf(callOut, n, "%s", s_want);
+        if (latOut) *latOut = s_wantLat;
+        if (lonOut) *lonOut = s_wantLon;
         return true;
     }
     return false;

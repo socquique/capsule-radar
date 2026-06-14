@@ -11,6 +11,10 @@
 #include "route_client.h"
 #include "photo.h"
 #include "photo_client.h"
+#include "weather.h"
+#include "weather_client.h"
+#include "net_guard.h"
+#include "app_log.h"
 #include "radar_view.h"
 #include "ui.h"
 #include "display.h"                  // M0: CO5300 + LVGL bring-up
@@ -18,8 +22,8 @@
 #include "battery.h"                 // AXP2101 battery gauge
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
 #include "audio.h"                   // ES8311 alert pings
-#include <set>                       // audio: track which contacts are in range
 #include <string>
+#include <string.h>
 #include <WiFiManager.h>             // captive portal
 #include <Preferences.h>            // NVS (persist theme/settings)
 #include <time.h>                   // NTP/RTC clock + date
@@ -40,46 +44,104 @@ static int                   g_brightnessDay = BRIGHTNESS_DEFAULT;   // user bri
 static int                   g_volume = 60;                          // alert volume 0..100 (web/NVS)
 static bool                  g_muted  = false;                       // mute alert pings
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
-static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
+static bool                  g_animations = true;                    // sweep + center pulse animation on/off (web/NVS)
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
+static bool                  g_showGroundAircraft = false;           // parked/taxiing aircraft on/off (web/NVS)
+static char                  g_tzLabel[96] = "(UTC -06:00) Central Time - Chicago, Mexico City";
+static char                  g_tzStr[80] = TZ_STR;
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
 static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
+static uint8_t               g_snapStage = 0;                        // spread ADS-B UI work across loop turns
 static volatile bool         g_requery = false;                      // range changed -> adsb_task re-begins
 static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
+static volatile bool         g_centerSavePending = false;
+static uint32_t              g_centerSaveAtMs = 0;
+static volatile bool         g_mapPanActive = false;
+
+static void logHeapLine(const char *tag) {
+    app_log_printf("[%s] heap %u biggest %u psram %u\n",
+                  tag ? tag : "mem",
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                  (unsigned)ESP.getFreePsram());
+}
+
+static void restartNow(const char *reason) {
+    app_log_printf("[restart] %s\n", reason ? reason : "unspecified");
+    Serial.flush();
+    delay(150);
+    ESP.restart();
+}
+
+static void pumpDisplay(uint32_t budgetMs = 4) {
+    const uint32_t start = millis();
+    const uint8_t maxPasses = (budgetMs >= 8) ? 8 : 4;
+    uint8_t passes = 0;
+    do {
+        display::loop();
+        yield();
+        passes++;
+    } while (passes < maxPasses && millis() - start < budgetMs);
+}
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
     std::vector<Aircraft> fresh;
+    fresh.reserve(ADSB_MAX_AIRCRAFT);
     bool wasConnected = false;
+    bool feedWasOk = true;
     uint32_t lastPoll = 0;
+    uint32_t lastAdsbLog = 0;
+    int lastAdsbCount = -1;
     uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
-            Serial.printf("[adsb] WiFi up, IP %s\n", WiFi.localIP().toString().c_str());
-            configTzTime(TZ_STR, "pool.ntp.org", "time.nist.gov");  // local time (Spain)
-            Serial.println("[web] config: http://capsuleradar.local/  (or the IP above)");
+            app_log_printf("[wifi] connected: %s RSSI %d dBm\n",
+                          WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+            configTzTime(g_tzStr, "pool.ntp.org", "time.nist.gov");
+            app_log_println("[web] config: http://capsuleradar.local/  (or the IP above)");
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
+        } else if (!conn && wasConnected) {
+            app_log_println("[wifi] disconnected; pausing network fetches");
         }
         wasConnected = conn;
         // self-heal: a long feed outage while WiFi is up usually means the internal heap
         // fragmented and the TLS handshake can't allocate -> reboot to recover (settings persist).
         if (!conn) lastFeedOk = millis();
         else if (millis() - lastFeedOk > 180000UL) {
-            Serial.println("[adsb] feed stuck >180s with WiFi up -> restarting to recover");
-            delay(100);
-            ESP.restart();
+            restartNow("adsb feed stuck >180s with WiFi up");
+        }
+        if (g_mapPanActive || g_centerSavePending) {
+            // Intentional pause: the center point is moving or waiting to be persisted.
+            // Do not poll against stale coordinates; resume after the delayed save/requery.
+            lastFeedOk = millis();
+            g_lastFeedOkMs = lastFeedOk;
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
         }
         if (g_requery) {                          // display range changed (double-tap zoom)
             g_adsb.begin(g_settings.homeLat, g_settings.homeLon, g_requeryKm);
             g_requery = false;
             lastPoll = 0;                         // poll immediately at the new radius
+            app_log_printf("[adsb] query center %.5f, %.5f radius %.0f km\n",
+                          g_settings.homeLat, g_settings.homeLon, g_requeryKm);
         }
         if (conn) {
+            WeatherRequest wxReq;
+            if (weather_pending(&wxReq)) {
+                // Weather image refresh is HTTPS/TLS-heavy. Do it alone, then let
+                // ADS-B resume on the next pass so the two feeds do not compete.
+                lastFeedOk = millis();
+                g_lastFeedOkMs = lastFeedOk;
+                weather_fetch(wxReq);
+                vTaskDelay(pdMS_TO_TICKS(250));
+                continue;
+            }
             // The live aircraft feed is the primary job, so poll FIRST every cycle. That keeps
             // it refreshing even while the user taps around — a slow route/photo lookup (below)
             // can block this single network task, so it must never get ahead of the feed.
@@ -88,40 +150,61 @@ static void adsb_task(void*) {
             if (lastPoll == 0 || nowMs - lastPoll >= pollInterval) {  // aircraft feed
                 lastPoll = nowMs;
                 static int failCount = 0;
-                // poll() flips to the alternate host on failure, so consecutive polls already
-                // alternate hosts; a single transient miss is absorbed by the failCount window.
+                // poll() retries the primary once, then falls back to the secondary. A single
+                // transient miss is absorbed by the failCount window.
                 if (g_adsb.poll(fresh)) {
-                    Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
+                    const int count = (int)fresh.size();
+                    const bool recovered = !feedWasOk;
+                    const bool countShift = lastAdsbCount < 0 || abs(count - lastAdsbCount) >= 5;
+                    if (recovered || countShift || nowMs - lastAdsbLog >= 60000UL) {
+                        app_log_printf("[adsb] ok (%s): %d aircraft%s\n",
+                                      g_adsb.lastHostRole(), count, recovered ? " (recovered)" : "");
+                        lastAdsbLog = nowMs;
+                        lastAdsbCount = count;
+                    }
+                    feedWasOk = true;
                     failCount = 0;
                     g_feedOk = true;
                     lastFeedOk = nowMs;
                     g_lastFeedOkMs = nowMs;          // HUD: mark data as fresh
                     if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                        g_aircraft.swap(fresh);   // O(1) handoff: no per-Aircraft String copies under the lock
+                        g_aircraft.swap(fresh);   // O(1) handoff: no per-Aircraft copies under the lock
                         g_acDirty = true;
                         xSemaphoreGive(g_ac_mutex);
                     }
                 } else {
-                    Serial.println("[adsb] poll failed");
-                    if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
+                    if (tls_largest_internal_block() < TLS_INTERNAL_MIN_BYTES) {
+                        // Memory pressure is local, not a bad feed. Back off without driving
+                        // the self-heal reboot path; the HUD can still age to stale naturally.
+                        lastFeedOk = nowMs;
+                        failCount = 0;
+                    } else {
+                        failCount++;
+                        if (failCount == 1 || failCount == 5) {
+                            app_log_printf("[adsb] poll failed (%d consecutive): %s\n",
+                                          failCount, g_adsb.lastError());
+                        }
+                        if (failCount >= 5) {
+                            if (feedWasOk) app_log_println("[adsb] feed stale");
+                            feedWasOk = false;
+                            g_feedOk = false;   // sustained outage -> HUD warning
+                        }
+                    }
                 }
             }
             // Then the on-demand lookups for the selected aircraft. Their timeouts are kept
             // short (see photo_client / route_client) so a slow photo server can't freeze the
             // feed for long; the next loop iteration polls again as soon as they return.
             char wantCall[12];
-            if (route_pending(wantCall, sizeof(wantCall))) {
+            double routeLat = 0.0, routeLon = 0.0;
+            if (route_pending(wantCall, sizeof(wantCall), &routeLat, &routeLon)) {
                 char from[40] = "", to[40] = "";
-                if (route_cache_get(wantCall, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantCall, from, to);                       // NVS hit, no network
-                    Serial.printf("[route] %s (cache): '%s' -> '%s'\n", wantCall, from, to);
-                } else if (route_fetch(wantCall, from, sizeof(from), to, sizeof(to))) {
+                if (route_fetch(wantCall, routeLat, routeLon, from, sizeof(from), to, sizeof(to))) {
                     route_store(wantCall, from, to);
-                    route_cache_put(wantCall, from, to);                  // remember across reboots
-                    Serial.printf("[route] %s (net): '%s' -> '%s'\n", wantCall, from, to);
+                    app_log_printf("[route] %s (net): '%s' -> '%s'\n", wantCall, from, to);
                 } else {
                     route_store(wantCall, from, to);   // empty -> don't refetch this session
-                    Serial.printf("[route] %s: no route\n", wantCall);
+                    app_log_printf("[route] %s: no route\n", wantCall);
                 }
             }
             char wantHex[10];
@@ -142,22 +225,41 @@ static void loadSettings() {
     g_muted            = p.getBool("mute", false);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
+    char tzLabel[sizeof(g_tzLabel)] = "";
+    char tzStr[sizeof(g_tzStr)] = "";
+    if (p.getString("tzLabel", tzLabel, sizeof(tzLabel)) > 0) snprintf(g_tzLabel, sizeof(g_tzLabel), "%s", tzLabel);
+    if (p.getString("tz", tzStr, sizeof(tzStr)) > 0) snprintf(g_tzStr, sizeof(g_tzStr), "%s", tzStr);
     p.end();
 }
 
 // Ping when a new aircraft enters range (rate-limited) or for emergency/military (always).
+struct AudioHex {
+    char hex[8];
+};
+
+static bool audioSeenContains(const std::vector<AudioHex> &seen, const char *hex) {
+    for (const AudioHex &item : seen) {
+        if (strcmp(item.hex, hex) == 0) return true;
+    }
+    return false;
+}
+
 static void checkAudioEvents() {
     if (!audio_present()) return;
-    static std::set<std::string> seen;
+    static std::vector<AudioHex> seen;
+    static std::vector<AudioHex> now;
     static bool first = true;
     static uint32_t lastNew = 0;
-    std::set<std::string> now;
+    seen.reserve(ADSB_MAX_AIRCRAFT);
+    now.clear();
+    now.reserve(ADSB_MAX_AIRCRAFT);
     for (const Aircraft &ac : g_snap) {
         const double d = geo::haversineKm(g_settings.homeLat, g_settings.homeLon, ac.lat, ac.lon);
         if (d > g_settings.rangeKm) continue;                 // in-range only
-        const std::string hex = ac.hex.c_str();
-        now.insert(hex);
-        if (first || seen.count(hex)) continue;               // not new
+        AudioHex key{};
+        snprintf(key.hex, sizeof(key.hex), "%s", ac.hex);
+        now.push_back(key);
+        if (first || audioSeenContains(seen, ac.hex)) continue; // not new
         if (acIsEmergency(ac.squawk) || ac.military) {   // military flag comes from the feed (dbFlags)
             audio_play(AUDIO_ALERT);                          // urgent: always
         } else if (millis() - lastNew > 3000) {
@@ -177,11 +279,73 @@ static void onRangeChange(float km) {
     p.begin("capsuleradar", false);
     p.putFloat("rangeKm", km);
     p.end();
-    g_requeryKm = constrain(km * 1.6f, 50.0f, 200.0f);
+    g_requeryKm = constrain(km * ADSB_QUERY_FACTOR, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
     g_requery = true;
+    app_log_printf("[settings] range %.0f km; ADS-B query %.0f km\n", km, g_requeryKm);
     radar::update(g_snap, g_settings);   // instant visual zoom from the last snapshot
     ui_set_range_km(km);
     ui_on_data_updated();
+}
+
+static void onWeatherRefresh() {
+    app_log_printf("[weather] refresh requested at %.5f, %.5f\n", g_settings.homeLat, g_settings.homeLon);
+    weather_request(g_settings.homeLat, g_settings.homeLon, g_settings.rangeKm);
+}
+
+static void requeryAdsbForCurrentRange() {
+    g_requeryKm = constrain(g_settings.rangeKm * ADSB_QUERY_FACTOR, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
+    g_requery = true;
+}
+
+static void onMapPan(int dx, int dy, bool done) {
+    static bool dirty = false;
+    static int visualDx = 0;
+    static int visualDy = 0;
+    if (dx || dy) {
+        g_mapPanActive = true;
+        g_centerSavePending = false;   // a new pan supersedes any delayed save from the previous one
+        const double metersPerPx = (double)MAP_PAN_GAIN * (double)g_settings.rangeKm * 1000.0 / (double)RADAR_R_OUTER_PX;
+        const double latRad = g_settings.homeLat * 0.017453292519943295;
+        const double mPerDegLat = 111320.0;
+        const double mPerDegLon = mPerDegLat * cos(latRad);
+
+        // Drag moves the map under your fingers: right = center moves west, down = center moves north.
+        const double eastM = -(double)dx * metersPerPx;
+        const double northM = (double)dy * metersPerPx;
+        g_settings.homeLat += northM / mPerDegLat;
+        if (fabs(mPerDegLon) > 1.0) g_settings.homeLon += eastM / mPerDegLon;
+        if (g_settings.homeLat > 89.9) g_settings.homeLat = 89.9;
+        if (g_settings.homeLat < -89.9) g_settings.homeLat = -89.9;
+        while (g_settings.homeLon > 180.0) g_settings.homeLon -= 360.0;
+        while (g_settings.homeLon < -180.0) g_settings.homeLon += 360.0;
+
+        visualDx += (int)lround((double)dx * (double)MAP_PAN_GAIN);
+        visualDy += (int)lround((double)dy * (double)MAP_PAN_GAIN);
+        radar::setMapPanOffset(visualDx, visualDy);
+        dirty = true;
+    }
+    if (done && dirty) {
+        radar::update(g_snap, g_settings);   // one full reproject after the fast visual drag
+        visualDx = 0;
+        visualDy = 0;
+        g_centerSavePending = true;
+        g_centerSaveAtMs = millis() + 1500UL;
+        dirty = false;
+    }
+    if (done) g_mapPanActive = false;
+}
+
+static void savePendingCenterIfDue() {
+    if (!g_centerSavePending || millis() < g_centerSaveAtMs) return;
+    Preferences p;
+    p.begin("capsuleradar", false);
+    p.putDouble("homeLat", g_settings.homeLat);
+    p.putDouble("homeLon", g_settings.homeLon);
+    p.end();
+    requeryAdsbForCurrentRange();
+    g_centerSavePending = false;
+    app_log_printf("[map] center saved %.5f, %.5f; requery %.0f km\n",
+                  g_settings.homeLat, g_settings.homeLon, g_requeryKm);
 }
 
 // Persist the visual theme in NVS (called when the user long-presses to switch).
@@ -196,18 +360,18 @@ static void saveTheme(int t) {
 static time_t utc_to_time(struct tm *utc) {
     setenv("TZ", "UTC0", 1); tzset();
     const time_t t = mktime(utc);
-    setenv("TZ", TZ_STR, 1); tzset();   // restore local TZ for getLocalTime()
+    setenv("TZ", g_tzStr, 1); tzset();   // restore local TZ for getLocalTime()
     return t;
 }
 
 // Seed the ESP system clock from the RTC so the clock/date are right before NTP.
 static void rtc_seed_clock() {
     struct tm utc;
-    if (!rtc_read(&utc)) { Serial.println("[rtc] no valid time stored"); return; }
+    if (!rtc_read(&utc)) { app_log_println("[rtc] no valid time stored"); return; }
     const time_t t = utc_to_time(&utc);
     struct timeval tv = { t, 0 };
     settimeofday(&tv, nullptr);
-    Serial.println("[rtc] system clock seeded from RTC");
+    app_log_println("[rtc] system clock seeded from RTC");
 }
 
 // Brightness combines idle auto-dim and face-down sleep (sleep wins -> screen off).
@@ -223,9 +387,97 @@ static void applyBrightness() {
 // ----------------------------- configuration web --------------------------------
 static WebServer g_web(80);
 
+struct TzPreset { const char *group; const char *label; const char *tz; };
+static const TzPreset TZ_PRESETS[] = {
+    {"North America", "(UTC -10:00) Hawaii Time - Honolulu", "HST10"},
+    {"North America", "(UTC -09:00) Alaska Time - Anchorage", "AKST9AKDT,M3.2.0/2,M11.1.0/2"},
+    {"North America", "(UTC -08:00) Pacific Time - Los Angeles, Vancouver", "PST8PDT,M3.2.0/2,M11.1.0/2"},
+    {"North America", "(UTC -07:00) Mountain Time - Denver, Calgary", "MST7MDT,M3.2.0/2,M11.1.0/2"},
+    {"North America", "(UTC -07:00) Arizona Time - Phoenix", "MST7"},
+    {"North America", "(UTC -06:00) Central Time - Chicago, Mexico City", "CST6CDT,M3.2.0/2,M11.1.0/2"},
+    {"North America", "(UTC -05:00) Eastern Time - New York, Toronto", "EST5EDT,M3.2.0/2,M11.1.0/2"},
+    {"North America", "(UTC -04:00) Atlantic Time - Halifax, San Juan", "AST4ADT,M3.2.0/2,M11.1.0/2"},
+    {"North America", "(UTC -03:30) Newfoundland Time - St Johns", "NST3:30NDT,M3.2.0/2,M11.1.0/2"},
+    {"South America", "(UTC -05:00) Colombia/Peru Time - Bogota, Lima", "COT5"},
+    {"South America", "(UTC -04:00) Bolivia/Venezuela Time - La Paz, Caracas", "BOT4"},
+    {"South America", "(UTC -03:00) Argentina/Uruguay Time - Buenos Aires, Montevideo", "ART3"},
+    {"South America", "(UTC -03:00) Brazil Time - Sao Paulo, Rio de Janeiro", "BRT3"},
+    {"Atlantic", "(UTC -01:00) Azores Time - Ponta Delgada", "AZOT1AZOST,M3.5.0/0,M10.5.0/1"},
+    {"Europe", "(UTC +00:00) Greenwich Mean Time - Reykjavik", "GMT0"},
+    {"Europe", "(UTC +00:00) UK/Ireland Time - London, Dublin", "GMT0BST,M3.5.0/1,M10.5.0"},
+    {"Europe", "(UTC +01:00) Central Europe - Paris, Berlin, Madrid, Rome", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe", "(UTC +02:00) Eastern Europe - Athens, Helsinki, Cairo", "EET-2EEST,M3.5.0/3,M10.5.0/4"},
+    {"Europe", "(UTC +03:00) Turkey Time - Istanbul", "TRT-3"},
+    {"Europe", "(UTC +03:00) Moscow Time - Moscow", "MSK-3"},
+    {"Africa", "(UTC +00:00) West Africa - Dakar, Accra", "GMT0"},
+    {"Africa", "(UTC +01:00) West Central Africa - Lagos, Algiers", "WAT-1"},
+    {"Africa", "(UTC +02:00) South Africa/Central Africa - Johannesburg, Harare", "SAST-2"},
+    {"Africa", "(UTC +03:00) East Africa - Nairobi, Addis Ababa", "EAT-3"},
+    {"Middle East", "(UTC +02:00) Israel Time - Tel Aviv, Jerusalem", "IST-2IDT,M3.4.4/26,M10.5.0"},
+    {"Middle East", "(UTC +03:00) Arabia Time - Riyadh, Baghdad", "AST-3"},
+    {"Middle East", "(UTC +03:30) Iran Time - Tehran", "IRST-3:30"},
+    {"Middle East", "(UTC +04:00) Gulf Time - Dubai, Abu Dhabi", "GST-4"},
+    {"Asia", "(UTC +04:30) Afghanistan Time - Kabul", "AFT-4:30"},
+    {"Asia", "(UTC +05:00) Pakistan Time - Karachi, Islamabad", "PKT-5"},
+    {"Asia", "(UTC +05:30) India Time - Delhi, Mumbai, Kolkata", "IST-5:30"},
+    {"Asia", "(UTC +05:45) Nepal Time - Kathmandu", "NPT-5:45"},
+    {"Asia", "(UTC +06:00) Bangladesh Time - Dhaka", "BST-6"},
+    {"Asia", "(UTC +06:30) Myanmar Time - Yangon", "MMT-6:30"},
+    {"Asia", "(UTC +07:00) Indochina Time - Bangkok, Jakarta, Ho Chi Minh City", "ICT-7"},
+    {"Asia", "(UTC +08:00) China Time - Beijing, Shanghai, Hong Kong", "CST-8"},
+    {"Asia", "(UTC +08:00) Singapore/Malaysia Time - Singapore, Kuala Lumpur", "SGT-8"},
+    {"Asia", "(UTC +08:00) Western Australia - Perth", "AWST-8"},
+    {"Asia", "(UTC +09:00) Japan/Korea Time - Tokyo, Seoul", "JST-9"},
+    {"Australia and Pacific", "(UTC +09:30) Northern Territory - Darwin", "ACST-9:30"},
+    {"Australia and Pacific", "(UTC +09:30) South Australia - Adelaide", "ACST-9:30ACDT,M10.1.0,M4.1.0/3"},
+    {"Australia and Pacific", "(UTC +10:00) Queensland - Brisbane", "AEST-10"},
+    {"Australia and Pacific", "(UTC +10:00) Eastern Australia - Sydney, Melbourne", "AEST-10AEDT,M10.1.0,M4.1.0/3"},
+    {"Australia and Pacific", "(UTC +12:00) New Zealand - Auckland, Wellington", "NZST-12NZDT,M9.5.0,M4.1.0/3"},
+    {"Australia and Pacific", "(UTC +12:45) Chatham Islands - Chatham", "CHAST-12:45CHADT,M9.5.0/2:45,M4.1.0/3:45"},
+    {"Australia and Pacific", "(UTC +13:00) Tonga/Samoa Time - Nukualofa, Apia", "TOT-13"},
+    {"UTC offsets", "(UTC -12:00) Fixed Offset", "UTC12"},
+    {"UTC offsets", "(UTC -11:00) Fixed Offset", "UTC11"},
+    {"UTC offsets", "(UTC -10:00) Fixed Offset", "UTC10"},
+    {"UTC offsets", "(UTC -09:30) Fixed Offset", "UTC9:30"},
+    {"UTC offsets", "(UTC -09:00) Fixed Offset", "UTC9"},
+    {"UTC offsets", "(UTC -08:00) Fixed Offset", "UTC8"},
+    {"UTC offsets", "(UTC -07:00) Fixed Offset", "UTC7"},
+    {"UTC offsets", "(UTC -06:00) Fixed Offset", "UTC6"},
+    {"UTC offsets", "(UTC -05:00) Fixed Offset", "UTC5"},
+    {"UTC offsets", "(UTC -04:00) Fixed Offset", "UTC4"},
+    {"UTC offsets", "(UTC -03:30) Fixed Offset", "UTC3:30"},
+    {"UTC offsets", "(UTC -03:00) Fixed Offset", "UTC3"},
+    {"UTC offsets", "(UTC -02:00) Fixed Offset", "UTC2"},
+    {"UTC offsets", "(UTC -01:00) Fixed Offset", "UTC1"},
+    {"UTC offsets", "(UTC +00:00) Coordinated Universal Time", "UTC0"},
+    {"UTC offsets", "(UTC +01:00) Fixed Offset", "UTC-1"},
+    {"UTC offsets", "(UTC +02:00) Fixed Offset", "UTC-2"},
+    {"UTC offsets", "(UTC +03:00) Fixed Offset", "UTC-3"},
+    {"UTC offsets", "(UTC +03:30) Fixed Offset", "UTC-3:30"},
+    {"UTC offsets", "(UTC +04:00) Fixed Offset", "UTC-4"},
+    {"UTC offsets", "(UTC +04:30) Fixed Offset", "UTC-4:30"},
+    {"UTC offsets", "(UTC +05:00) Fixed Offset", "UTC-5"},
+    {"UTC offsets", "(UTC +05:30) Fixed Offset", "UTC-5:30"},
+    {"UTC offsets", "(UTC +05:45) Fixed Offset", "UTC-5:45"},
+    {"UTC offsets", "(UTC +06:00) Fixed Offset", "UTC-6"},
+    {"UTC offsets", "(UTC +06:30) Fixed Offset", "UTC-6:30"},
+    {"UTC offsets", "(UTC +07:00) Fixed Offset", "UTC-7"},
+    {"UTC offsets", "(UTC +08:00) Fixed Offset", "UTC-8"},
+    {"UTC offsets", "(UTC +08:45) Fixed Offset", "UTC-8:45"},
+    {"UTC offsets", "(UTC +09:00) Fixed Offset", "UTC-9"},
+    {"UTC offsets", "(UTC +09:30) Fixed Offset", "UTC-9:30"},
+    {"UTC offsets", "(UTC +10:00) Fixed Offset", "UTC-10"},
+    {"UTC offsets", "(UTC +10:30) Fixed Offset", "UTC-10:30"},
+    {"UTC offsets", "(UTC +11:00) Fixed Offset", "UTC-11"},
+    {"UTC offsets", "(UTC +12:00) Fixed Offset", "UTC-12"},
+    {"UTC offsets", "(UTC +12:45) Fixed Offset", "UTC-12:45"},
+    {"UTC offsets", "(UTC +13:00) Fixed Offset", "UTC-13"},
+    {"UTC offsets", "(UTC +14:00) Fixed Offset", "UTC-14"},
+};
+
 static void handleRoot() {
     const int th = radar::theme();
-    const int ranges[] = {10, 15, 25, 30, 50, 100, 150, 250};
+    const int ranges[] = {5, 10, 15, 25, 30, 50, 100, 150, 250};
     String ropts;
     for (int r : ranges) {
         char o[72];
@@ -259,8 +511,32 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_units ? " selected" : "", unames[i]);
         uopts += o;
     }
-    static char buf[7200];   // static (not on the 8 KB loop-task stack) to avoid overflow
-    snprintf(buf, sizeof(buf),
+    String tzopts = "<option value=''>Keep current</option>";
+    const char *group = "";
+    const char *currentTzLabel = g_tzLabel;
+    for (const TzPreset &z : TZ_PRESETS) {
+        if (strcmp(group, z.group) != 0) {
+            if (group[0]) tzopts += "</optgroup>";
+            group = z.group;
+            tzopts += "<optgroup label='"; tzopts += group; tzopts += "'>";
+        }
+        tzopts += "<option value='"; tzopts += z.label; tzopts += "|"; tzopts += z.tz; tzopts += "'";
+        if (strcmp(z.tz, g_tzStr) == 0) {
+            tzopts += " selected";
+            currentTzLabel = z.label;
+        }
+        tzopts += ">";
+        tzopts += z.label; tzopts += "</option>";
+    }
+    if (group[0]) tzopts += "</optgroup>";
+
+    const size_t bufN = 24000;
+    char *buf = (char *)heap_caps_malloc(bufN, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        g_web.send(503, "text/plain", "Not enough memory to render portal");
+        return;
+    }
+    snprintf(buf, bufN,
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>Capsule Radar</title>"
@@ -298,14 +574,19 @@ static void handleRoot() {
         "<label>Center longitude</label><input id=lon name=lon value='%.5f'>"
         "<label>Display range (km)</label><select name=range>%s</select>"
         "<label>Theme</label><select name=theme>%s</select>"
-        "<button>Save &amp; restart</button></form></div>"
+        "<button>Save &amp; apply</button></form></div>"
         "<div class=card><div class=t>Display</div>"
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
-        "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
+        "<label><input type=checkbox class=ck %s onchange='an(this.checked)'>Animations</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
-        "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
+        "<label><input type=checkbox class=ck %s onchange='ga(this.checked)'>Show ground aircraft</label>"
+        "<label>Units</label><select onchange='u(this.value)'>%s</select>"
+        "<form method=POST action=/save>"
+        "<label>Timezone</label><select name=tzPick>%s</select>"
+        "<p style='color:#9affc8;font-size:13px;margin:8px 0 0'>Current: %s</p>"
+        "<button>Save timezone</button></form></div>"
         "<div class=card><div class=t>Sound</div>"
         "<label>Volume</label>"
         "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
@@ -328,37 +609,118 @@ static void handleRoot() {
         "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
-        "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
+        "function an(c){fetch('/animations?v='+(c?1:0)+'&save=1')}"
         "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
-        "function u(v){fetch('/units?v='+v+'&save=1')}</script></body></html>",
+        "function ga(c){fetch('/ground?v='+(c?1:0)+'&save=1')}"
+        "function u(v){fetch('/units?v='+v+'&save=1')}"
+        "</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, ropts.c_str(), topts.c_str(),
-        g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
-        g_showAirports ? "checked" : "", uopts.c_str(),
+        g_brightnessDay, iopts.c_str(), g_animations ? "checked" : "",
+        g_showAirports ? "checked" : "", g_showGroundAircraft ? "checked" : "", uopts.c_str(),
+        tzopts.c_str(), currentTzLabel,
         g_volume, g_muted ? "checked" : "",
         g_settings.homeLat, g_settings.homeLon);
     g_web.send(200, "text/html", buf);
+    heap_caps_free(buf);
 }
 
 static void handleSave() {
+    bool mapChanged = false;
+    bool rangeChanged = false;
+    bool themeChanged = false;
+    bool tzChanged = false;
+    double newLat = g_settings.homeLat;
+    double newLon = g_settings.homeLon;
+    float newRange = g_settings.rangeKm;
+    int newTheme = radar::theme();
+    const char *newTzLabel = nullptr;
+    const char *newTz = nullptr;
+
     Preferences p;
     p.begin("capsuleradar", false);
     // Reject out-of-range coordinates so a typo can't leave the radar unusable.
     if (g_web.hasArg("lat")) {
         const double lat = g_web.arg("lat").toDouble();
-        if (lat >= -90.0 && lat <= 90.0) p.putDouble("homeLat", lat);
+        if (lat >= -90.0 && lat <= 90.0) {
+            newLat = lat;
+            p.putDouble("homeLat", lat);
+            mapChanged = true;
+        }
     }
     if (g_web.hasArg("lon")) {
         const double lon = g_web.arg("lon").toDouble();
-        if (lon >= -180.0 && lon <= 180.0) p.putDouble("homeLon", lon);
+        if (lon >= -180.0 && lon <= 180.0) {
+            newLon = lon;
+            p.putDouble("homeLon", lon);
+            mapChanged = true;
+        }
     }
-    if (g_web.hasArg("range")) p.putFloat("rangeKm", g_web.arg("range").toFloat());
-    if (g_web.hasArg("theme")) p.putInt("theme", g_web.arg("theme").toInt());
+    if (g_web.hasArg("range")) {
+        const float range = g_web.arg("range").toFloat();
+        if (range > 0.0f) {
+            newRange = range;
+            p.putFloat("rangeKm", range);
+            rangeChanged = true;
+        }
+    }
+    if (g_web.hasArg("theme")) {
+        const int theme = g_web.arg("theme").toInt();
+        if (theme >= 0 && theme < THEME_COUNT) {
+            newTheme = theme;
+            p.putInt("theme", theme);
+            themeChanged = true;
+        }
+    }
+    if (g_web.hasArg("tzPick")) {
+        String pick = g_web.arg("tzPick");
+        pick.trim();
+        const int split = pick.indexOf('|');
+        if (split > 0) {
+            String label = pick.substring(0, split);
+            String tz = pick.substring(split + 1);
+            label.trim();
+            tz.trim();
+            for (const TzPreset &z : TZ_PRESETS) {
+                if (label == z.label && tz == z.tz) {
+                    p.putString("tzLabel", z.label);
+                    p.putString("tz", z.tz);
+                    newTzLabel = z.label;
+                    newTz = z.tz;
+                    tzChanged = true;
+                    break;
+                }
+            }
+        }
+    }
     p.end();
+
+    if (mapChanged || rangeChanged) {
+        g_settings.homeLat = newLat;
+        g_settings.homeLon = newLon;
+        g_settings.rangeKm = newRange;
+        radar::update(g_snap, g_settings);
+        requeryAdsbForCurrentRange();
+        ui_set_range_km(g_settings.rangeKm);
+        ui_on_data_updated();
+        app_log_printf("[settings] portal map/range: %.5f, %.5f range %.0f km query %.0f km\n",
+                      g_settings.homeLat, g_settings.homeLon, g_settings.rangeKm, g_requeryKm);
+    }
+    if (themeChanged) {
+        radar::setTheme(newTheme);
+        app_log_printf("[settings] theme %d\n", newTheme);
+    }
+    if (tzChanged && newTzLabel && newTz) {
+        snprintf(g_tzLabel, sizeof(g_tzLabel), "%s", newTzLabel);
+        snprintf(g_tzStr, sizeof(g_tzStr), "%s", newTz);
+        setenv("TZ", g_tzStr, 1);
+        tzset();
+        if (WiFi.status() == WL_CONNECTED) configTzTime(g_tzStr, "pool.ntp.org", "time.nist.gov");
+        app_log_println("[settings] timezone updated");
+    }
+
     g_web.send(200, "text/html",
-        "<meta http-equiv=refresh content='4;url=/'><body style='background:#06100a;color:#1dff86;"
-        "font-family:sans-serif;padding:24px'>Saved. Restarting&hellip;</body>");
-    delay(400);
-    ESP.restart();
+        "<meta http-equiv=refresh content='1;url=/'><body style='background:#06100a;color:#1dff86;"
+        "font-family:sans-serif;padding:24px'>Saved. Applied.</body>");
 }
 
 static void handleWifi() {
@@ -367,7 +729,7 @@ static void handleWifi() {
         "WiFi reset. Connect to the <b>CapsuleRadar-Setup</b> network to reconfigure.</body>");
     delay(400);
     g_wm.resetSettings();
-    ESP.restart();
+    restartNow("wifi settings reset from web portal");
 }
 
 static void handleBright() {
@@ -431,14 +793,14 @@ static void handleUnits() {   // measurement units preset (live re-render)
     g_web.send(200, "text/plain", "ok");
 }
 
-static void handleSweep() {   // show/hide the rotating sweep line (live)
+static void handleAnimations() {   // show/hide radar animations: sweep + center pulse
     if (g_web.hasArg("v")) {
-        g_showSweep = g_web.arg("v").toInt() != 0;
-        radar::setSweepEnabled(g_showSweep);          // loop()/core 1: safe to touch LVGL
+        g_animations = g_web.arg("v").toInt() != 0;
+        radar::setSweepEnabled(g_animations);          // loop()/core 1: safe to touch LVGL
         if (g_web.hasArg("save")) {
             Preferences p;
             p.begin("capsuleradar", false);
-            p.putBool("sweep", g_showSweep);
+            p.putBool("sweep", g_animations);
             p.end();
         }
     }
@@ -453,6 +815,21 @@ static void handleAirports() {   // show/hide airport markers (live)
             Preferences p;
             p.begin("capsuleradar", false);
             p.putBool("airports", g_showAirports);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleGroundAircraft() {   // show/hide parked/taxiing aircraft (live)
+    if (g_web.hasArg("v")) {
+        g_showGroundAircraft = g_web.arg("v").toInt() != 0;
+        radar::setGroundAircraftEnabled(g_showGroundAircraft);
+        ui_on_data_updated();
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("groundac", g_showGroundAircraft);
             p.end();
         }
     }
@@ -493,65 +870,88 @@ static void handleUpdatePage() {
 static void handleUpdateUpload() {
     HTTPUpload &up = g_web.upload();
     if (up.status == UPLOAD_FILE_START) {
-        Serial.printf("[update] start: %s\n", up.filename.c_str());
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+        app_log_printf("[update] start: %s\n", up.filename.c_str());
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(app_log_stream());
     } else if (up.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+        if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(app_log_stream());
     } else if (up.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) Serial.printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
-        else Update.printError(Serial);
+        if (Update.end(true)) app_log_printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
+        else Update.printError(app_log_stream());
     }
 }
 
 void setup() {
     Serial.begin(115200);
     delay(200);
-    Serial.println("\nCapsule Radar boot");
+    app_log_println("Capsule Radar boot");
 
     if (PIN_LCD_SCLK < 0 || PIN_I2C_SDA < 0) {
-        Serial.println("[!] Pins in config.h are still -1. Copy them from the Waveshare demo.");
+        app_log_println("[!] Pins in config.h are still -1. Copy them from the Waveshare demo.");
     }
-    Serial.printf("PSRAM: %u bytes free\n", (unsigned)ESP.getFreePsram());
+    app_log_printf("PSRAM: %u bytes free\n", (unsigned)ESP.getFreePsram());
 
     loadSettings();
-    route_cache_begin();   // clear stale route cache if the label format changed
+    g_aircraft.reserve(ADSB_MAX_AIRCRAFT);
+    g_snap.reserve(ADSB_MAX_AIRCRAFT);
+    app_log_printf("[config] center %.5f, %.5f range %.0f km units %d airports %s ground %s\n",
+                  g_settings.homeLat, g_settings.homeLon, g_settings.rangeKm, g_units,
+                  g_showAirports ? "on" : "off", g_showGroundAircraft ? "on" : "off");
+    app_log_printf("[config] timezone %s\n", g_tzLabel);
+    logHeapLine("boot");
 
     // --- Display + LVGL (M0) ----------------------------------------------
     // CO5300 AMOLED over QSPI + LVGL draw buffers in PSRAM, then a hello screen.
     // The panel is powered from the always-on DC1 rail, so it lights without the
     // PMIC. Touch (CST9217 indev) + AXP2101 come in later milestones.
-    if (!display::begin()) {
-        Serial.println("[!] display::begin() failed — check QSPI pins / power.");
+    const bool displayOk = display::begin();
+    if (!displayOk) {
+        app_log_println("[!] display::begin() failed — check QSPI pins / power.");
     }
+    auto bootPump = [&]() {
+        if (!displayOk) return;
+        for (int i = 0; i < 3; ++i) {
+            display::loop();
+            delay(5);
+        }
+    };
+    bootPump();
 
     // restore the saved theme, then persist any future change
     {
         Preferences p;
         p.begin("capsuleradar", true);
         const int t = p.getInt("theme", THEME_PHOSPHOR);
-        g_showSweep = p.getBool("sweep", true);
+        g_animations = p.getBool("sweep", true);
         g_showAirports = p.getBool("airports", true);
+        g_showGroundAircraft = p.getBool("groundac", false);
         p.end();
         radar::setTheme(t);
-        radar::setSweepEnabled(g_showSweep);
+        radar::setSweepEnabled(g_animations);
         radar::setAirportsEnabled(g_showAirports);
+        radar::setGroundAircraftEnabled(g_showGroundAircraft);
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
+    ui_set_pan_cb(onMapPan);                     // two-finger drag -> move/save center point
+    ui_set_weather_refresh_cb(onWeatherRefresh); // weather page manual refresh
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
+    radar::update(g_snap, g_settings);           // draw static map/airports before the first ADS-B poll
+    bootPump();
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
     battery_begin();   // AXP2101 (no-op if not detected / no battery)
     battery_enable_codec_rail();   // power the ES8311 analog rail before audio init
+    bootPump();
 
-    setenv("TZ", TZ_STR, 1); tzset();   // local time for display even before NTP
+    setenv("TZ", g_tzStr, 1); tzset();   // local time for display even before NTP
     rtc_begin();
     rtc_seed_clock();                   // offline clock/date from the PCF85063
     if (audio_begin()) {                // ES8311 alert pings (no-op if codec absent)
         audio_set_volume(g_volume);
         audio_set_muted(g_muted);
     }
+    bootPump();
 
     // --- Radar UI ----------------------------------------------------------
     // radar::init() runs inside display::begin() (LVGL must be up first).
@@ -573,17 +973,16 @@ void setup() {
         "a{color:#1dff86}.q{filter:hue-rotate(90deg)}"
         "</style>");
     if (g_wm.autoConnect("CapsuleRadar-Setup"))
-        Serial.println("[wifi] connected");
+        app_log_println("[wifi] connected");
     else
-        Serial.println("[wifi] config portal open - join 'CapsuleRadar-Setup' to set WiFi; UI stays live");
+        app_log_println("[wifi] config portal open - join 'CapsuleRadar-Setup' to set WiFi; UI stays live");
+    bootPump();
 
     // --- OTA ---------------------------------------------------------------
     // ArduinoOTA is started from loop() once WiFi connects (see otaUp there).
 
     // --- ADS-B client + task ----------------------------------------------
-    float queryKm = g_settings.rangeKm * 1.6f;          // query wider than the display range
-    if (queryKm < 50.0f)  queryKm = 50.0f;
-    if (queryKm > 200.0f) queryKm = 200.0f;
+    float queryKm = constrain(g_settings.rangeKm * ADSB_QUERY_FACTOR, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
     g_adsb.begin(g_settings.homeLat, g_settings.homeLon, queryKm);
     g_ac_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(adsb_task, "adsb", 16384, nullptr, 1, nullptr, 0);  // TLS needs a big stack
@@ -595,8 +994,10 @@ void setup() {
     g_web.on("/bright", handleBright);
     g_web.on("/vol", handleVol);
     g_web.on("/idle", handleIdle);
-    g_web.on("/sweep", handleSweep);
+    g_web.on("/animations", handleAnimations);
+    g_web.on("/sweep", handleAnimations);      // backwards-compatible with any stale portal page
     g_web.on("/airports", handleAirports);
+    g_web.on("/ground", handleGroundAircraft);
     g_web.on("/units", handleUnits);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/update", HTTP_POST,
@@ -604,18 +1005,24 @@ void setup() {
             const bool ok = !Update.hasError();
             g_web.send(200, "text/plain", ok ? "OK" : "FAIL");
             delay(800);
-            if (ok) ESP.restart();
+            if (ok) restartNow("browser OTA update complete");
         },
         handleUpdateUpload);
     g_web.begin();
 
-    Serial.println("setup done");
+    ui_splash_hide();
+    app_log_println("setup done");
 }
 
 void loop() {
-    display::loop();                // drive LVGL (render dirty areas + run timers)
+    pumpDisplay();                  // drive LVGL (render dirty areas + run timers)
+    if (g_mapPanActive) {           // keep two-finger map panning feeling responsive
+        pumpDisplay(8);
+    }
     g_wm.process();                 // service the WiFi config portal (non-blocking)
     g_web.handleClient();           // serve the configuration web page
+    savePendingCenterIfDue();       // debounce NVS writes after two-finger map panning
+    if (weather_take_dirty()) ui_weather_updated();
 
     // OTA: set up once WiFi is up, then service it every loop (flash over the air)
     static bool otaUp = false;
@@ -624,9 +1031,10 @@ void loop() {
         ArduinoOTA.begin();
         MDNS.addService("http", "tcp", 80);            // advertise the config web page
         otaUp = true;
-        Serial.println("[ota] ready: pio run -e esp32-s3-amoled-175-ota -t upload");
+        app_log_println("[ota] ready: pio run -e esp32-s3-amoled-175-ota -t upload");
     }
     if (otaUp) ArduinoOTA.handle();
+    pumpDisplay(2);
 
     // Push a fresh ADS-B snapshot to the radar (copy under the mutex, render outside).
     if (g_acDirty) {
@@ -634,10 +1042,20 @@ void loop() {
             g_snap.swap(g_aircraft);   // O(1) handoff under the lock; render on g_snap outside it.
             g_acDirty = false;         // g_aircraft now holds the previous snapshot (overwritten next poll)
             xSemaphoreGive(g_ac_mutex);
-            radar::update(g_snap, g_settings); // rebuild the glyph/trail layer
-            ui_on_data_updated();              // refresh card/list/stats
-            checkAudioEvents();                // ping new-in-range / emergency / military
+            g_snapStage = 1;
         }
+    }
+    if (g_snapStage == 1) {
+        radar::update(g_snap, g_settings); // rebuild the glyph/trail layer
+        g_snapStage = 2;
+        pumpDisplay(1);
+    } else if (g_snapStage == 2) {
+        ui_on_data_updated();              // refresh card/list/stats
+        g_snapStage = 3;
+        pumpDisplay(1);
+    } else if (g_snapStage == 3) {
+        checkAudioEvents();                // ping new-in-range / emergency / military
+        g_snapStage = 0;
     }
 
     // periodic: HUD clock + wifi/battery indicators
@@ -649,7 +1067,7 @@ void loop() {
         const uint32_t fr = display_frames();
         const unsigned fps = (fr - lastFrames) / 5;
         lastFrames = fr;
-        Serial.printf("[mem] heap %u (min %u, biggest %u) | psram %u free | up %lus | aircraft %d | fps %u\n",
+        app_log_printf("[mem] heap %u (min %u, biggest %u) | psram %u free | up %lus | aircraft %d | fps %u\n",
                       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                       (unsigned)ESP.getFreePsram(), (unsigned long)(millis() / 1000),
@@ -685,7 +1103,7 @@ void loop() {
             time_t now = time(nullptr);
             struct tm utc;
             gmtime_r(&now, &utc);
-            if (rtc_write(&utc)) { g_rtcSynced = true; Serial.println("[rtc] saved NTP time"); }
+            if (rtc_write(&utc)) { g_rtcSynced = true; app_log_println("[rtc] saved NTP time"); }
         }
     }
 
@@ -705,5 +1123,5 @@ void loop() {
         }
     }
 
-    delay(5);
+    delay(1);
 }

@@ -5,6 +5,8 @@
 #include "photo_client.h"
 #include "photo.h"
 #include "config.h"
+#include "net_guard.h"
+#include "app_log.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -41,10 +43,10 @@ static bool http_get(const char *url, uint8_t **out, size_t *outLen, size_t maxL
     http.setReuse(false);
     http.setConnectTimeout(3000);    // keep short: this runs on the feed task, a slow photo
     http.setTimeout(6000);           // server must not freeze the live aircraft poll for long
-    if (!http.begin(cli, url)) { Serial.println("[photo]   http.begin failed"); return false; }
+    if (!http.begin(cli, url)) { app_log_println("[photo]   http.begin failed"); return false; }
     http.setUserAgent(PS_UA);   // planespotters rejects the default UA; set the canonical one
     const int code = http.GET();
-    if (code != 200) { Serial.printf("[photo]   HTTP %d\n", code); http.end(); return false; }
+    if (code != 200) { app_log_printf("[photo]   HTTP %d\n", code); http.end(); return false; }
 
     const int len = http.getSize();                  // >0 = Content-Length; -1 = chunked/unknown
     uint8_t *buf = nullptr;
@@ -103,10 +105,9 @@ static PsramAlloc s_jsonPsram;
 bool photo_fetch(const char *hex) {
     if (!hex || !hex[0] || WiFi.status() != WL_CONNECTED) { photo_commit(0, 0, hex, ""); return false; }
 
-    // Memory guard: a photo fetch needs a TLS handshake + JPEG decode. If the largest
-    // contiguous internal block is tight, skip it (degrade gracefully, never crash).
-    if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 28000) {
-        Serial.println("[photo] low memory, skipping");
+    // Memory guard: a photo fetch needs a TLS handshake + JPEG decode.
+    if (!tls_heap_ok("photo")) {
+        app_log_println("[photo] low memory, skipping");
         photo_commit(0, 0, hex, "");
         return false;
     }
@@ -115,7 +116,7 @@ bool photo_fetch(const char *hex) {
     char url[128];
     snprintf(url, sizeof(url), "https://api.planespotters.net/pub/photos/hex/%s", hex);
     uint8_t *jbuf = nullptr; size_t jlen = 0;
-    if (!http_get(url, &jbuf, &jlen, 8192)) { Serial.printf("[photo] %s: planespotters request failed\n", hex); photo_commit(0, 0, hex, ""); return false; }
+    if (!http_get(url, &jbuf, &jlen, 8192)) { app_log_printf("[photo] %s: planespotters request failed\n", hex); photo_commit(0, 0, hex, ""); return false; }
 
     JsonDocument filter(&s_jsonPsram);
     filter["photos"][0]["thumbnail_large"]["src"] = true;
@@ -123,12 +124,12 @@ bool photo_fetch(const char *hex) {
     JsonDocument doc(&s_jsonPsram);
     const DeserializationError err = deserializeJson(doc, jbuf, jlen, DeserializationOption::Filter(filter));
     heap_caps_free(jbuf);
-    if (err) { Serial.printf("[photo] %s: json err %s\n", hex, err.c_str()); photo_commit(0, 0, hex, ""); return false; }
+    if (err) { app_log_printf("[photo] %s: json err %s\n", hex, err.c_str()); photo_commit(0, 0, hex, ""); return false; }
 
     const char *imgUrl = doc["photos"][0]["thumbnail_large"]["src"] | "";
     char credit[40];
     snprintf(credit, sizeof(credit), "%s", (const char *)(doc["photos"][0]["photographer"] | ""));
-    if (!imgUrl[0]) { Serial.printf("[photo] %s: no photo available\n", hex); photo_commit(0, 0, hex, ""); return false; }
+    if (!imgUrl[0]) { app_log_printf("[photo] %s: no photo available\n", hex); photo_commit(0, 0, hex, ""); return false; }
 
     // 2) download the JPEG thumbnail.
     // planespotters serves *progressive* JPEGs, which TJpgDec cannot decode. Route the
@@ -144,14 +145,14 @@ bool photo_fetch(const char *hex) {
              "https://images.weserv.nl/?url=%s&w=%d&h=%d&fit=inside&output=jpg", bare, canvasW, canvasH);
 
     uint8_t *img = nullptr; size_t ilen = 0;
-    if (!http_get(proxUrl, &img, &ilen, 65536)) { Serial.printf("[photo] %s: image download failed\n", hex); photo_commit(0, 0, hex, ""); return false; }
+    if (!http_get(proxUrl, &img, &ilen, 65536)) { app_log_printf("[photo] %s: image download failed\n", hex); photo_commit(0, 0, hex, ""); return false; }
 
     // 3) decode into the shared PSRAM buffer, scaled to fit
     int maxW = 0, maxH = 0;
     lv_color_t *dst = photo_buffer(&maxW, &maxH);
     uint16_t jw = 0, jh = 0;
     if (TJpgDec.getJpgSize(&jw, &jh, img, ilen) != JDR_OK || jw == 0 || jh == 0) {
-        Serial.printf("[photo] %s: getJpgSize failed\n", hex);
+        app_log_printf("[photo] %s: getJpgSize failed\n", hex);
         heap_caps_free(img); photo_commit(0, 0, hex, ""); return false;
     }
     uint8_t scale = 1;
@@ -169,6 +170,6 @@ bool photo_fetch(const char *hex) {
 
     if (jr != JDR_OK) { photo_commit(0, 0, hex, ""); return false; }
     photo_commit(s_dstW, s_dstH, hex, credit);
-    Serial.printf("[photo] %s: %dx%d (scale 1/%d) by %s\n", hex, s_dstW, s_dstH, scale, credit);
+    app_log_printf("[photo] %s: %dx%d (scale 1/%d) by %s\n", hex, s_dstW, s_dstH, scale, credit);
     return true;
 }
