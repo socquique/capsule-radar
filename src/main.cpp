@@ -848,6 +848,9 @@ void loop() {
             if (gps_location(&glat, &glon) &&
                 geo::haversineKm(g_settings.homeLat, g_settings.homeLon, glat, glon) > 1.0) {
                 g_settings.homeLat = glat; g_settings.homeLon = glon;   // radar/coastline recenter
+                // re-query the new area — set the radius too (same formula as boot/zoom), or
+                // adsb_task would re-begin with a stale/zero g_requeryKm and fetch 0 aircraft.
+                g_requeryKm = constrain(g_settings.rangeKm * 1.6f, 50.0f, 200.0f);
                 g_requery = true;                                       // adsb_task re-queries the new area
                 Serial.printf("[gps] re-centred to %.4f, %.4f\n", glat, glon);
             }
