@@ -29,12 +29,10 @@ void AdsbClient::begin(double homeLat, double homeLon, float rangeKm) {
 
 bool AdsbClient::poll(std::vector<Aircraft>& out) {
     if (WiFi.status() != WL_CONNECTED) return false;
-    // Prefer the primary host, and give it a quick second try before touching the fallback:
-    // the primary is reliable in practice, while the fallback can be slow to time out from
-    // some networks (turning one transient primary blip into a long no-data gap + amber HUD).
+    // Try each independent provider once. Retrying the primary immediately can violate its
+    // one-request-per-second limit and adds another full timeout to an already slow failure.
     if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;
-    if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;   // transient blip -> retry the healthy host
-    return fetchFrom(ADSB_FALLBACK_HOST, out);            // last resort
+    return fetchFrom(ADSB_FALLBACK_HOST, out);
 }
 
 bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
@@ -74,7 +72,10 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
     DeserializationError err = deserializeJson(doc, http.getStream(),
                                                DeserializationOption::Filter(filter));
     http.end();
-    if (err) return false;
+    if (err) {
+        Serial.printf("[adsb] JSON parse failed (%s): %s\n", host, err.c_str());
+        return false;
+    }
 
     JsonArrayConst arr = doc["ac"].as<JsonArrayConst>();
     if (arr.isNull()) arr = doc["aircraft"].as<JsonArrayConst>();
