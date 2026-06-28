@@ -90,13 +90,19 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
         Aircraft ac;
         ac.hex    = (const char*)(a["hex"] | "");
         if (ac.hex.length() == 0) continue;
+
+        // alt_baro is the string "ground" for aircraft on the ground. With hide-ground on we skip
+        // them HERE (before they count toward the RAM cap) so busy-airport ground traffic can't
+        // crowd out the airborne planes overhead.
+        const bool onGround = a["alt_baro"].is<const char*>();
+        if (_hideGround && onGround) continue;
+
         ac.flight = String((const char*)(a["flight"] | "")); ac.flight.trim();
         ac.type   = (const char*)(a["t"] | "");
         ac.lat    = a["lat"].as<double>();
         ac.lon    = a["lon"].as<double>();
-
-        if (a["alt_baro"].is<const char*>()) { ac.onGround = true; ac.altBaro = 0; }  // "ground"
-        else                                  ac.altBaro = a["alt_baro"] | 0.0f;
+        ac.onGround = onGround;
+        ac.altBaro  = onGround ? 0.0f : (a["alt_baro"] | 0.0f);
 
         ac.track    = a["track"].is<float>() ? a["track"].as<float>() : (a["true_heading"] | NAN);
         ac.gs       = a["gs"] | NAN;

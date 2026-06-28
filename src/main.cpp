@@ -46,6 +46,7 @@ static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim afte
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
+static bool                  g_hideGround   = false;                 // skip on-ground aircraft in the feed (web/NVS)
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static bool                  g_useGps = false;                       // auto-set home from the LC76G GPS (-G variant) (web/NVS)
 static int                   g_trailLen = 2;                         // aircraft trails 0=off 1=short 2=med 3=long (web/NVS)
@@ -416,6 +417,7 @@ static void handleRoot() {
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
+        "<label><input type=checkbox class=ck %s onchange='hg(this.checked)'>Hide aircraft on the ground</label>"
         "<label>Aircraft trails</label><select onchange='tl(this.value)'>%s</select>"
         "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
@@ -445,6 +447,7 @@ static void handleRoot() {
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
         "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
+        "function hg(c){fetch('/ground?v='+(c?1:0)+'&save=1')}"
         "function tl(v){fetch('/trail?v='+v+'&save=1')}"
         "function ro(v){fetch('/rotate?v='+v+'&save=1')}"
         "function u(v){fetch('/units?v='+v+'&save=1')}"
@@ -462,7 +465,7 @@ static void handleRoot() {
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
-        g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), uopts.c_str(),
+        g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", tlopts.c_str(), rotopts.c_str(), uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     g_web.send(200, "text/html", buf);
@@ -619,6 +622,20 @@ static void handleAirports() {   // show/hide airport markers (live)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleGround() {   // hide/show on-ground aircraft (applies from the next feed poll)
+    if (g_web.hasArg("v")) {
+        g_hideGround = g_web.arg("v").toInt() != 0;
+        g_adsb.setHideGround(g_hideGround);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("hideground", g_hideGround);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 static void handleRotate() {   // display rotation 0/90/180/270 for any USB-C orientation (live)
     if (g_web.hasArg("v")) {
         g_rotation = constrain((int)g_web.arg("v").toInt(), 0, 3);
@@ -718,11 +735,13 @@ void setup() {
         const int t = p.getInt("theme", THEME_PHOSPHOR);
         g_showSweep = p.getBool("sweep", true);
         g_showAirports = p.getBool("airports", true);
+        g_hideGround = p.getBool("hideground", false);
         g_rotation = p.getInt("rot", 0);
         p.end();
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
+        g_adsb.setHideGround(g_hideGround);
         radar::setTrailLength(g_trailLen);
         display::setRotation((uint8_t)g_rotation);
     }
@@ -796,6 +815,7 @@ void setup() {
     g_web.on("/idle", handleIdle);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
+    g_web.on("/ground", handleGround);
     g_web.on("/trail", handleTrail);
     g_web.on("/rotate", handleRotate);
     g_web.on("/gps", handleGps);

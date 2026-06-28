@@ -9,6 +9,7 @@ public:
     void begin(double homeLat, double homeLon, float rangeKm);
     void setHome(double lat, double lon) { _lat = lat; _lon = lon; }
     void setRange(float km) { _rangeKm = km; }
+    void setHideGround(bool h) { _hideGround = h; }   // skip on-ground aircraft during parse
 
     // Fetch + parse. Returns true on success and fills `out` (replaces contents).
     // On failure, leaves `out` untouched and returns false (caller keeps last good).
@@ -21,5 +22,6 @@ private:
 
     double _lat = 0, _lon = 0;
     float  _rangeKm = 15.0f;
+    bool   _hideGround = false;
     uint32_t _lastOkMs = 0;
 };
