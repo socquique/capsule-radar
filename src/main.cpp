@@ -7,6 +7,7 @@
 #include "aircraft.h"
 #include "geo.h"
 #include "adsb_client.h"
+#include "snapshot_gate.h"
 #include "route.h"
 #include "route_client.h"
 #include "photo.h"
@@ -88,6 +89,8 @@ static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
     std::vector<Aircraft> fresh;
+    AircraftSnapshotGate snapshotGate;
+    bool retainingEmptySnapshot = false;
     bool wasConnected = false;
     uint32_t lastPoll = 0;
     uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
@@ -125,18 +128,33 @@ static void adsb_task(void*) {
             if (lastPoll == 0 || nowMs - lastPoll >= pollInterval) {  // aircraft feed
                 lastPoll = nowMs;
                 static int failCount = 0;
-                // poll() flips to the alternate host on failure, so consecutive polls already
-                // alternate hosts; a single transient miss is absorbed by the failCount window.
+                // poll() tries the fallback provider after a primary failure; keep the HUD
+                // healthy through isolated misses and warn only after a sustained outage.
                 if (g_adsb.poll(fresh)) {
                     Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
                     failCount = 0;
                     g_feedOk = true;
-                    lastFeedOk = nowMs;
-                    g_lastFeedOkMs = nowMs;          // HUD: mark data as fresh
-                    if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                        g_aircraft.swap(fresh);   // O(1) handoff: no per-Aircraft String copies under the lock
-                        g_acDirty = true;
-                        xSemaphoreGive(g_ac_mutex);
+                    const uint32_t receivedMs = millis();
+                    lastFeedOk = receivedMs;
+                    g_lastFeedOkMs = receivedMs;      // HUD: mark data as fresh
+
+                    const bool publish = snapshotGate.shouldPublish(
+                        !fresh.empty(), receivedMs, AC_STALE_MS);
+                    if (!publish) {
+                        if (!retainingEmptySnapshot) {
+                            Serial.printf("[adsb] empty snapshot; retaining contacts for %u ms\n",
+                                          (unsigned)AC_STALE_MS);
+                            retainingEmptySnapshot = true;
+                        }
+                    } else {
+                        if (retainingEmptySnapshot && fresh.empty())
+                            Serial.println("[adsb] empty snapshot persisted; clearing stale contacts");
+                        retainingEmptySnapshot = false;
+                        if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                            g_aircraft.swap(fresh);   // O(1) handoff: no per-Aircraft String copies under the lock
+                            g_acDirty = true;
+                            xSemaphoreGive(g_ac_mutex);
+                        }
                     }
                 } else {
                     Serial.println("[adsb] poll failed");
