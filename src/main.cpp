@@ -29,7 +29,8 @@
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
 #include <Update.h>                 // browser OTA: self-flash an uploaded .bin
 #include <esp_heap_caps.h>          // largest-free-block metric (heap health)
-#include <esp_wifi.h>               // esp_wifi_restore() (WiFi reset must survive the reboot)
+#include <esp_wifi.h>               // WiFi driver control (reset must survive the reboot)
+#include <nvs.h>                    // erase the driver's "nvs.net80211" namespace (WiFi reset)
 
 // ---- shared state ----
 static std::vector<Aircraft> g_aircraft;      // latest snapshot
@@ -531,12 +532,22 @@ static void handleWifi() {
     g_web.send(200, "text/html",
         "<body style='background:#06100a;color:#ffb23c;font-family:sans-serif;padding:24px'>"
         "WiFi reset. Connect to the <b>CapsuleRadar-Setup</b> network to reconfigure.</body>");
-    delay(400);                    // let the response reach the browser
-    g_wm.resetSettings();          // WiFiManager-level erase...
-    WiFi.disconnect(true, true);   // ...belt & braces: driver-level erase of the stored AP
-    esp_wifi_restore();            // ...and factory-reset the WiFi config in NVS
-    delay(600);                    // give NVS time to commit BEFORE rebooting (else creds survive
-    ESP.restart();                 //   and the device just reconnects — seen on Arduino core 3.x)
+    delay(400);                     // let the response reach the browser
+    // The driver stores the saved AP in its own NVS namespace ("nvs.net80211"). On Arduino
+    // core 3.x both wm.resetSettings() and WiFi.disconnect(true,true) can silently no-op
+    // (they fail once the driver is off), so v1.3.19's reset still reconnected. Erasing that
+    // namespace directly is unconditional — it works whatever state the WiFi driver is in.
+    g_wm.resetSettings();           // best-effort driver-level erase first...
+    WiFi.disconnect(false, true);   // ...keep WiFi up so the erase can actually run
+    delay(100);
+    nvs_handle_t h;                 // ...then the guaranteed path: wipe the driver's namespace
+    if (nvs_open("nvs.net80211", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_all(h);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    delay(300);                     // let NVS finish committing before the reboot
+    ESP.restart();
 }
 
 static void handleBright() {
