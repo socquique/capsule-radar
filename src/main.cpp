@@ -51,7 +51,7 @@ static bool                  g_showAirports = true;                  // airport 
 static bool                  g_hideGround   = false;                 // skip on-ground aircraft in the feed (web/NVS)
 static int                   g_minAltFt     = 0;                     // only show aircraft above this altitude, ft (0 = off) (web/NVS)
 static bool                  g_milOnly      = false;                 // only show military-flagged aircraft (web/NVS)
-static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
+static int                   g_rotation = 0;                         // clockwise display rotation, 0..359° (web/NVS)
 static bool                  g_useGps = false;                       // auto-set home from the LC76G GPS (-G variant) (web/NVS)
 static int                   g_trailLen = 2;                         // aircraft trails 0=off 1=short 2=med 3=long (web/NVS)
 static int                   g_maxAc = 20;                           // max aircraft drawn on the scope (web/NVS)
@@ -325,13 +325,6 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_units ? " selected" : "", unames[i]);
         uopts += o;
     }
-    const char *rnames[] = {"0\xc2\xb0 (default)", "90\xc2\xb0", "180\xc2\xb0", "270\xc2\xb0"};
-    String rotopts;
-    for (int i = 0; i < 4; ++i) {
-        char o[64];
-        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_rotation ? " selected" : "", rnames[i]);
-        rotopts += o;
-    }
     const char *tlnames[] = {"Off", "Short", "Medium", "Long"};
     String tlopts;
     for (int i = 0; i < 4; ++i) {
@@ -446,7 +439,8 @@ static void handleRoot() {
         "<label><input type=checkbox class=ck %s onchange='mo(this.checked)'>Military aircraft only</label>"
         "<label>Aircraft trails</label><select onchange='tl(this.value)'>%s</select>"
         "<label>Max aircraft on screen</label><select onchange='mx(this.value)'>%s</select>"
-        "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
+        "<label>Screen rotation (degrees clockwise)</label>"
+        "<input type=number min=0 max=359 step=1 value='%d' onchange='ro(this.value)'>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
         "<div class=card><div class=t>Sound</div>"
         "<label>Volume</label>"
@@ -496,7 +490,7 @@ static void handleRoot() {
         tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), g_milOnly ? "checked" : "",
-        tlopts.c_str(), mxopts.c_str(), rotopts.c_str(), uopts.c_str(),
+        tlopts.c_str(), mxopts.c_str(), g_rotation, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     g_web.send(200, "text/html", buf);
@@ -722,14 +716,15 @@ static void handleGround() {   // hide/show on-ground aircraft (applies from the
     g_web.send(200, "text/plain", "ok");
 }
 
-static void handleRotate() {   // display rotation 0/90/180/270 for any USB-C orientation (live)
+static void handleRotate() {   // arbitrary clockwise display rotation, applied live
     if (g_web.hasArg("v")) {
-        g_rotation = constrain((int)g_web.arg("v").toInt(), 0, 3);
-        display::setRotation((uint8_t)g_rotation);
+        g_rotation = constrain((int)g_web.arg("v").toInt(), 0, 359);
+        display::setRotation((uint16_t)g_rotation);
+        g_rotation = display::rotation();
         if (g_web.hasArg("save")) {
             Preferences p;
             p.begin("capsuleradar", false);
-            p.putInt("rot", g_rotation);
+            p.putInt("rotDeg", g_rotation);
             p.end();
         }
     }
@@ -824,7 +819,10 @@ void setup() {
         g_hideGround = p.getBool("hideground", false);
         g_minAltFt = p.getInt("minalt", 0);
         g_milOnly = p.getBool("milonly", false);
-        g_rotation = p.getInt("rot", 0);
+        // Migrate the old quarter-turn setting (rot=0..3) without changing existing
+        // installations' orientation. New firmware stores actual degrees separately.
+        g_rotation = p.isKey("rotDeg") ? p.getInt("rotDeg", 0) : p.getInt("rot", 0) * 90;
+        g_rotation = constrain(g_rotation, 0, 359);
         p.end();
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
@@ -834,7 +832,8 @@ void setup() {
         g_adsb.setMilitaryOnly(g_milOnly);
         radar::setTrailLength(g_trailLen);
         radar::setMaxOnScreen(g_maxAc);
-        display::setRotation((uint8_t)g_rotation);
+        display::setRotation((uint16_t)g_rotation);
+        g_rotation = display::rotation();
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
