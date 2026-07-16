@@ -238,7 +238,7 @@ static void onRangeChange(float km) {
     p.begin("capsuleradar", false);
     p.putFloat("rangeKm", km);
     p.end();
-    g_requeryKm = constrain(km * 1.6f, 50.0f, 200.0f);
+    g_requeryKm = constrain(km * ADSB_QUERY_MULT, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
     g_requery = true;
     radar::update(g_snap, g_settings);   // instant visual zoom from the last snapshot
     ui_set_range_km(km);
@@ -889,9 +889,7 @@ void setup() {
     // ArduinoOTA is started from loop() once WiFi connects (see otaUp there).
 
     // --- ADS-B client + task ----------------------------------------------
-    float queryKm = g_settings.rangeKm * 1.6f;          // query wider than the display range
-    if (queryKm < 50.0f)  queryKm = 50.0f;
-    if (queryKm > 200.0f) queryKm = 200.0f;
+    float queryKm = constrain(g_settings.rangeKm * ADSB_QUERY_MULT, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
     g_adsb.begin(g_settings.homeLat, g_settings.homeLon, queryKm);
     g_ac_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(adsb_task, "adsb", 16384, nullptr, 1, nullptr, 0);  // TLS needs a big stack
@@ -991,9 +989,11 @@ void loop() {
         // freeze but the icon would otherwise stay white.
         const bool feedFresh = wifiUp && (millis() - g_lastFeedOkMs < 18000UL);
         ui_set_status(wifiUp, feedFresh, rssi, clk);
-        char net[80];
+        char net[112];
         if (WiFi.status() == WL_CONNECTED)
-            snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s", WiFi.localIP().toString().c_str());
+            // IP + the active centre point (helps users verify what actually got saved)
+            snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s  \xc2\xb7  %.5f, %.5f",
+                     WiFi.localIP().toString().c_str(), g_settings.homeLat, g_settings.homeLon);
         else
             snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
         ui_set_netinfo(net);
@@ -1018,7 +1018,7 @@ void loop() {
                 g_settings.homeLat = glat; g_settings.homeLon = glon;   // radar/coastline recenter
                 // re-query the new area — set the radius too (same formula as boot/zoom), or
                 // adsb_task would re-begin with a stale/zero g_requeryKm and fetch 0 aircraft.
-                g_requeryKm = constrain(g_settings.rangeKm * 1.6f, 50.0f, 200.0f);
+                g_requeryKm = constrain(g_settings.rangeKm * ADSB_QUERY_MULT, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
                 g_requery = true;                                       // adsb_task re-queries the new area
                 Serial.printf("[gps] re-centred to %.4f, %.4f\n", glat, glon);
             }

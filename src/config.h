@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.3.20"   // shown on the web config page + Stats screen; bump on release
+#define FW_VERSION "1.3.21"   // shown on the web config page + Stats screen; bump on release
 // Edit pins below: replace every -1 with the value from the Waveshare factory demo
 // (see docs/HARDWARE.md and docs/SETUP.md). Do NOT guess them.
 
@@ -11,8 +11,14 @@
 #define HOME_LON_DEFAULT    0.1059
 
 // ---------- Radar ----------
-#define RANGE_KM_DEFAULT    30.0f          // display range (outer ring). Query is wider, see ADSB_QUERY_KM
-#define ADSB_QUERY_KM       50.0f          // feed query radius (> display: off-range traffic shows as edge arrows)
+#define RANGE_KM_DEFAULT    30.0f          // display range (outer ring). Query is wider, see below.
+// Feed query radius = display range × MULT, clamped to [MIN, MAX]. Querying a bit wider than
+// the display shows off-range traffic as edge arrows. The floor MUST stay small: the old 50 km
+// floor made small display ranges still pull a huge aircraft list in busy airspace, which timed
+// out the poll (feed permanently amber near big hubs). Fix contributed by @alexzogh (STLWarehouse).
+#define ADSB_QUERY_MULT     1.4f
+#define ADSB_QUERY_MIN_KM   12.0f
+#define ADSB_QUERY_MAX_KM   150.0f
 static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define POLL_INTERVAL_MS    2000           // be gentle with the free API (>=1000)
 #define POLL_INTERVAL_BATTERY_MS 5000      // slower polling when running on battery
