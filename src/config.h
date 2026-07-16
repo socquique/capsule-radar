@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.3.21"   // shown on the web config page + Stats screen; bump on release
+#define FW_VERSION "1.3.22"   // shown on the web config page + Stats screen; bump on release
 // Edit pins below: replace every -1 with the value from the Waveshare factory demo
 // (see docs/HARDWARE.md and docs/SETUP.md). Do NOT guess them.
 

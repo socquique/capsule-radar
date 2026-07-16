@@ -230,6 +230,15 @@ static void checkAudioEvents() {
     first = false;
 }
 
+// Feed query radius: wider than the display range (so off-range traffic shows as edge
+// arrows) AND wide enough to cover the proximity-alert circle (else an alert radius larger
+// than the query would never fire), clamped to keep busy-airspace downloads bounded.
+static float queryRadiusKm() {
+    float km = g_settings.rangeKm * ADSB_QUERY_MULT;
+    if (g_proximityKm > 0.0f && g_proximityKm * 1.2f > km) km = g_proximityKm * 1.2f;
+    return constrain(km, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
+}
+
 // Double-tap zoom: change the display range, persist it, and ask adsb_task to
 // re-query at a matching radius (safely, on its own core). Re-render immediately.
 static void onRangeChange(float km) {
@@ -238,7 +247,7 @@ static void onRangeChange(float km) {
     p.begin("capsuleradar", false);
     p.putFloat("rangeKm", km);
     p.end();
-    g_requeryKm = constrain(km * ADSB_QUERY_MULT, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
+    g_requeryKm = queryRadiusKm();
     g_requery = true;
     radar::update(g_snap, g_settings);   // instant visual zoom from the last snapshot
     ui_set_range_km(km);
@@ -583,7 +592,11 @@ static void handleVol() {
 
 static void handleAlerts() {   // what triggers the alert sound (live)
     if (g_web.hasArg("mode")) g_alertMode   = constrain((int)g_web.arg("mode").toInt(), 0, 2);
-    if (g_web.hasArg("prox")) g_proximityKm = g_web.arg("prox").toFloat();   // km (0 = off)
+    if (g_web.hasArg("prox")) {
+        g_proximityKm = g_web.arg("prox").toFloat();   // km (0 = off)
+        g_requeryKm = queryRadiusKm();                 // the query must cover the new alert circle
+        g_requery = true;
+    }
     if (g_web.hasArg("save")) {
         Preferences p;
         p.begin("capsuleradar", false);
@@ -889,7 +902,7 @@ void setup() {
     // ArduinoOTA is started from loop() once WiFi connects (see otaUp there).
 
     // --- ADS-B client + task ----------------------------------------------
-    float queryKm = constrain(g_settings.rangeKm * ADSB_QUERY_MULT, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
+    float queryKm = queryRadiusKm();
     g_adsb.begin(g_settings.homeLat, g_settings.homeLon, queryKm);
     g_ac_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(adsb_task, "adsb", 16384, nullptr, 1, nullptr, 0);  // TLS needs a big stack
@@ -1018,7 +1031,7 @@ void loop() {
                 g_settings.homeLat = glat; g_settings.homeLon = glon;   // radar/coastline recenter
                 // re-query the new area — set the radius too (same formula as boot/zoom), or
                 // adsb_task would re-begin with a stale/zero g_requeryKm and fetch 0 aircraft.
-                g_requeryKm = constrain(g_settings.rangeKm * ADSB_QUERY_MULT, ADSB_QUERY_MIN_KM, ADSB_QUERY_MAX_KM);
+                g_requeryKm = queryRadiusKm();
                 g_requery = true;                                       // adsb_task re-queries the new area
                 Serial.printf("[gps] re-centred to %.4f, %.4f\n", glat, glon);
             }
