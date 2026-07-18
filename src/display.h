@@ -19,11 +19,12 @@ void setBrightness(uint8_t v);
 // ms since the last touch (LVGL inactivity timer) — for idle auto-dim.
 uint32_t inactiveMs();
 
-// Rotate the whole UI in 90° steps (0/1/2/3 = 0°/90°/180°/270°), e.g. to mount with the
-// USB-C port on any side. Applied in the flush (180° in place; 90/270° via a PSRAM
-// scratch buffer) and mirrored on touch input.
-void setRotation(uint8_t quarters);
-uint8_t rotation();
+// Rotate the whole UI clockwise by an arbitrary number of degrees (normalized to
+// 0..359), e.g. to compensate for any enclosure/mounting angle. Cardinal rotations
+// keep their optimized flush paths; other angles use a PSRAM framebuffer. Touch input
+// is transformed back into the same logical coordinate space.
+void setRotation(uint16_t degrees);
+uint16_t rotation();
 
 } // namespace display
 
