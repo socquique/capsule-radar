@@ -4,11 +4,16 @@
 #include "radar_view.h"
 #include "route.h"
 #include "photo.h"
+#include "weather.h"
+#include "wx_radar.h"
+#include "cloud_image.h"
+#include "airports.h"
 #include "config.h"
 #include <lvgl.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 
 #define UI_GREEN lv_color_hex(0x1DFF86)
 #define UI_INK   lv_color_hex(0xEAFFF3)
@@ -18,7 +23,7 @@
 #define UI_EMERG lv_color_hex(0xFF5A3C)
 
 static lv_obj_t *s_tv = nullptr;
-static lv_obj_t *s_tileRadar = nullptr, *s_tileList = nullptr, *s_tileStats = nullptr;
+static lv_obj_t *s_tileRadar = nullptr, *s_tileList = nullptr, *s_tileStats = nullptr, *s_tileWeather = nullptr;
 static lv_obj_t *s_card = nullptr, *s_cardTitle = nullptr, *s_cardL = nullptr, *s_cardR = nullptr;
 static lv_obj_t *s_cardRoute = nullptr;
 static lv_obj_t *s_photo = nullptr, *s_photoCredit = nullptr;   // aircraft photo above the card
@@ -30,6 +35,22 @@ static lv_obj_t *s_statsLbl = nullptr;
 static lv_obj_t *s_statsNet = nullptr;
 static lv_obj_t *s_hudGps   = nullptr;   // HUD satellite icon (hidden unless GPS auto-location is on)
 static lv_obj_t *s_statsGps = nullptr;   // Stats view GPS status line
+static lv_obj_t *s_weatherNow = nullptr, *s_weatherMeta = nullptr, *s_weatherDays = nullptr;
+static lv_obj_t *s_wxCanvas = nullptr, *s_wxStatus = nullptr, *s_wxAirport = nullptr;
+static lv_obj_t *s_wxFooter = nullptr, *s_wxMeta = nullptr, *s_wxAttrib = nullptr;
+static lv_obj_t *s_wxRings[3] = { nullptr, nullptr, nullptr };
+static lv_obj_t *s_wxNorth = nullptr, *s_wxCenter = nullptr, *s_wxRange = nullptr;
+static lv_obj_t *s_weatherModeBtn = nullptr, *s_weatherModeLbl = nullptr;
+static lv_obj_t *s_weatherTitle = nullptr;
+enum WeatherViewMode { WEATHER_RADAR, WEATHER_CLOUDS, WEATHER_FORECAST };
+static WeatherViewMode s_weatherMode = WEATHER_RADAR;
+static lv_obj_t *s_fcCurrent = nullptr, *s_fcCondition = nullptr, *s_fcUpdated = nullptr;
+static lv_obj_t *s_fcMetricName[3] = { nullptr, nullptr, nullptr };
+static lv_obj_t *s_fcMetricValue[3] = { nullptr, nullptr, nullptr };
+static lv_obj_t *s_fcDay[3] = { nullptr, nullptr, nullptr };
+static lv_obj_t *s_fcDayCondition[3] = { nullptr, nullptr, nullptr };
+static lv_obj_t *s_fcDayTemp[3] = { nullptr, nullptr, nullptr };
+static lv_obj_t *s_fcDayRain[3] = { nullptr, nullptr, nullptr };
 
 // --------------------------------------------------------------------- units
 // 0 = Aviation (ft, kt, km) · 1 = Metric (m, km/h, km) · 2 = Imperial (ft, mph, mi).
@@ -59,6 +80,20 @@ static float dist_val(float km) {
     return km;                                   // Metric   -> km
 }
 static const char *dist_unit(void) { return s_units == 0 ? "nm" : (s_units == 2 ? "mi" : "km"); }
+
+static float weather_temp(float c) { return s_units == 2 ? c * 1.8f + 32.0f : c; }
+static const char *weather_temp_unit(void) { return s_units == 2 ? "F" : "C"; }
+static float weather_wind(float kmh) {
+    if (s_units == 0) return kmh * 0.539957f;
+    if (s_units == 2) return kmh * 0.621371f;
+    return kmh;
+}
+static const char *weather_wind_unit(void) { return s_units == 0 ? "kt" : (s_units == 2 ? "mph" : "km/h"); }
+static const char *cardinal(float deg) {
+    static const char *p[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    int i = ((int)(deg + 22.5f) / 45) & 7;
+    return p[i];
+}
 
 // Fold Latin-1 accents / drop any other non-ASCII so the Montserrat font never hits a
 // missing glyph (which renders as an empty box). Belt-and-suspenders for card text.
@@ -349,12 +384,159 @@ static void build_stats(void) {
     lv_label_set_text(s_statsLbl, st);
 }
 
+static void build_weather(void) {
+    if (!s_weatherNow || !s_weatherMeta || !s_weatherDays || !s_wxFooter) return;
+    WeatherSnapshot w;
+    if (!weather_get(w)) {
+        lv_label_set_text(s_weatherNow, "Forecast unavailable");
+        lv_label_set_text(s_weatherMeta, "Waiting for WiFi data...");
+        lv_label_set_text(s_wxFooter, "WEATHER DATA PENDING");
+        lv_label_set_text(s_weatherDays, "");
+    } else {
+        char now[96];
+        snprintf(now, sizeof(now), "%.0f %s\n%s", weather_temp(w.tempC),
+                 weather_temp_unit(), weather_condition(w.code));
+        lv_label_set_text(s_weatherNow, now);
+        char meta[128];
+        snprintf(meta, sizeof(meta), "Feels %.0f %s   Humidity %d%%\nWind %.0f %s  %s   Updated %s",
+                 weather_temp(w.feelsC), weather_temp_unit(), w.humidity,
+                 weather_wind(w.windKmh), weather_wind_unit(), cardinal((float)w.windDeg), w.updated);
+        lv_label_set_text(s_weatherMeta, meta);
+
+        char footer[96];
+        snprintf(footer, sizeof(footer), "%.0f %s   %s", weather_temp(w.tempC),
+                 weather_temp_unit(), weather_condition(w.code));
+        lv_label_set_text(s_wxFooter, footer);
+        char wxmeta[96];
+        snprintf(wxmeta, sizeof(wxmeta), "WIND %s %.0f %s   HUM %d%%",
+                 cardinal((float)w.windDeg), weather_wind(w.windKmh), weather_wind_unit(), w.humidity);
+        lv_label_set_text(s_wxMeta, wxmeta);
+
+        char current[24];
+        snprintf(current, sizeof(current), "%.0f %s", weather_temp(w.tempC), weather_temp_unit());
+        lv_label_set_text(s_fcCurrent, current);
+        lv_label_set_text(s_fcCondition, weather_condition(w.code));
+        lv_label_set_text(s_fcMetricValue[0], current);
+        char hum[16]; snprintf(hum, sizeof(hum), "%d%%", w.humidity);
+        lv_label_set_text(s_fcMetricValue[1], hum);
+        char wind[28]; snprintf(wind, sizeof(wind), "%s %.0f %s", cardinal((float)w.windDeg),
+                                weather_wind(w.windKmh), weather_wind_unit());
+        lv_label_set_text(s_fcMetricValue[2], wind);
+        char updated[24]; snprintf(updated, sizeof(updated), "UPDATED %s", w.updated);
+        lv_label_set_text(s_fcUpdated, updated);
+
+        for (int col = 0; col < 3; ++col) {
+            const int i = col + 1;
+            if (i < w.dayCount) {
+                lv_label_set_text(s_fcDay[col], weather_day_name(w.days[i].date));
+                lv_label_set_text(s_fcDayCondition[col], weather_condition(w.days[i].code));
+                char temps[28];
+                snprintf(temps, sizeof(temps), "%.0f / %.0f %s",
+                         weather_temp(w.days[i].tempMaxC), weather_temp(w.days[i].tempMinC), weather_temp_unit());
+                lv_label_set_text(s_fcDayTemp[col], temps);
+                char chance[20]; snprintf(chance, sizeof(chance), "RAIN %d%%", w.days[i].rainChance);
+                lv_label_set_text(s_fcDayRain[col], chance);
+            } else {
+                lv_label_set_text(s_fcDay[col], "-");
+                lv_label_set_text(s_fcDayCondition[col], "");
+                lv_label_set_text(s_fcDayTemp[col], "");
+                lv_label_set_text(s_fcDayRain[col], "");
+            }
+        }
+
+        char days[320] = "";
+        for (int i = 1; i < w.dayCount && i < 4; ++i) {
+            char row[104];
+            snprintf(row, sizeof(row), "%-3s  %-14s  %2.0f/%2.0f %s  %3d%%\n",
+                     weather_day_name(w.days[i].date), weather_condition(w.days[i].code),
+                     weather_temp(w.days[i].tempMaxC), weather_temp(w.days[i].tempMinC),
+                     weather_temp_unit(), w.days[i].rainChance);
+            strncat(days, row, sizeof(days) - strlen(days) - 1);
+        }
+        lv_label_set_text(s_weatherDays, days);
+    }
+
+    const uint16_t *radarPixels = nullptr, *cloudPixels = nullptr;
+    uint32_t frameTime = 0, version = 0;
+    double rlat = 0, rlon = 0;
+    const bool cloudMode = s_weatherMode == WEATHER_CLOUDS;
+    const bool forecastMode = s_weatherMode == WEATHER_FORECAST;
+    bool haveImage = false;
+    if (cloudMode)
+        haveImage = cloud_image_front(&cloudPixels, &frameTime, &rlat, &rlon, &version);
+    else
+        haveImage = wx_radar_front(&radarPixels, &frameTime, &rlat, &rlon, &version);
+    const uint16_t *pixels = cloudMode ? cloudPixels : radarPixels;
+    if (haveImage && pixels && s_wxCanvas) {
+        lv_canvas_set_buffer(s_wxCanvas, (void *)pixels, WX_RADAR_SIZE, WX_RADAR_SIZE, LV_IMG_CF_TRUE_COLOR);
+        lv_obj_clear_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_wxStatus, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(s_wxCanvas);
+        char iata[4]; float d = 0, b = 0;
+        if (airports_nearest_iata(rlat, rlon, 200.0f, iata, &d, &b)) {
+            char apt[64];
+            snprintf(apt, sizeof(apt), "O  %s   %.0f %s %s", iata, dist_val(d), dist_unit(), cardinal(b));
+            lv_label_set_text(s_wxAirport, apt);
+        } else lv_label_set_text(s_wxAirport, "RADAR CENTRE");
+        char stamp[6] = "--:--";
+        time_t ft = (time_t)frameTime; struct tm ti;
+        if (frameTime && localtime_r(&ft, &ti)) snprintf(stamp, sizeof(stamp), "%02d:%02d", ti.tm_hour, ti.tm_min);
+        char attr[64];
+        snprintf(attr, sizeof(attr), cloudMode ? "SAT %s  |  EUMETSAT" : "RADAR %s  |  RAINVIEWER", stamp);
+        lv_label_set_text(s_wxAttrib, attr);
+    } else {
+        if (s_wxCanvas) lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_wxStatus, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_wxAirport, "RADAR CENTRE");
+        lv_label_set_text(s_wxAttrib, cloudMode ? "WAITING FOR SATELLITE DATA" : "WAITING FOR RADAR DATA");
+    }
+
+    lv_obj_t *forecastObjs[] = {
+        s_fcCurrent, s_fcCondition, s_fcUpdated,
+        s_fcMetricName[0], s_fcMetricName[1], s_fcMetricName[2],
+        s_fcMetricValue[0], s_fcMetricValue[1], s_fcMetricValue[2],
+        s_fcDay[0], s_fcDay[1], s_fcDay[2],
+        s_fcDayCondition[0], s_fcDayCondition[1], s_fcDayCondition[2],
+        s_fcDayTemp[0], s_fcDayTemp[1], s_fcDayTemp[2],
+        s_fcDayRain[0], s_fcDayRain[1], s_fcDayRain[2]
+    };
+    lv_obj_t *radarObjs[] = { s_wxCanvas, s_wxStatus, s_wxAirport, s_wxFooter, s_wxMeta,
+                              s_wxAttrib, s_wxNorth, s_wxCenter, s_wxRange,
+                              s_wxRings[0], s_wxRings[1], s_wxRings[2] };
+    for (lv_obj_t *o : forecastObjs) if (o) {
+        if (forecastMode) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+    for (lv_obj_t *o : radarObjs) if (o) {
+        if (forecastMode) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); else lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (!forecastMode && haveImage) lv_obj_add_flag(s_wxStatus, LV_OBJ_FLAG_HIDDEN);
+    if (!forecastMode && !haveImage) lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(s_wxRange, cloudMode ? "200 KM" : "75 KM");
+    lv_label_set_text(s_weatherModeLbl,
+        s_weatherMode == WEATHER_RADAR ? "CLOUDS" :
+        s_weatherMode == WEATHER_CLOUDS ? "3-DAY FORECAST" : "WX RADAR");
+    if (s_weatherTitle) lv_label_set_text(s_weatherTitle,
+        s_weatherMode == WEATHER_RADAR ? "WX RADAR" :
+        s_weatherMode == WEATHER_CLOUDS ? "SAT CLOUDS" : "WEATHER");
+}
+
+static void weather_mode_cb(lv_event_t *) {
+    s_weatherMode = (WeatherViewMode)(((int)s_weatherMode + 1) % 3);
+    build_weather();
+}
+
+void ui_set_weather_forecast(bool forecast) {
+    s_weatherMode = forecast ? WEATHER_FORECAST : WEATHER_RADAR;
+    build_weather();
+}
+
 // Rebuild whichever of list/stats is currently on screen (called on poll and on swipe).
 static void refresh_active_tile(void) {
     if (!s_tv) return;
     lv_obj_t *act = lv_tileview_get_tile_act(s_tv);
     if (act == s_tileList)  build_list();
     else if (act == s_tileStats) build_stats();
+    else if (act == s_tileWeather) build_weather();
 }
 
 void ui_on_data_updated(void) {
@@ -447,7 +629,7 @@ static void build_card(void) {
 }
 
 void ui_show_view(int idx) {
-    if (s_tv && idx >= 0 && idx <= 2) lv_obj_set_tile_id(s_tv, (uint32_t)idx, 0, LV_ANIM_OFF);
+    if (s_tv && idx >= 0 && idx <= 3) lv_obj_set_tile_id(s_tv, (uint32_t)idx, 0, LV_ANIM_OFF);
 }
 
 // ------------------------------------------------------------------- splash
@@ -527,7 +709,8 @@ void ui_create(void) {
 
     s_tileRadar = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
     s_tileList  = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
-    s_tileStats = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT);
+    s_tileStats = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_HOR);
+    s_tileWeather = lv_tileview_add_tile(s_tv, 3, 0, LV_DIR_LEFT);
     // Rebuild the list/stats with the latest data the moment they slide into view
     // (between polls they'd otherwise show whatever was there when last visible).
     lv_obj_add_event_cb(s_tv, [](lv_event_t *) { refresh_active_tile(); }, LV_EVENT_VALUE_CHANGED, nullptr);
@@ -650,6 +833,203 @@ void ui_create(void) {
     lv_obj_set_style_text_color(ver, UI_DIM, 0);
     lv_label_set_text(ver, "Capsule Radar v" FW_VERSION);
     lv_obj_align(ver, LV_ALIGN_CENTER, 0, 170);
+
+    // --- weather tile (current conditions + next three days) ---
+    lv_obj_t *wp = make_round_panel(s_tileWeather);
+    lv_obj_set_style_bg_color(wp, lv_color_black(), 0); // hide square radar-tile bounds on AMOLED
+    s_weatherTitle = make_tile_title(wp, "WX RADAR");
+    lv_obj_set_style_bg_color(s_weatherTitle, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_weatherTitle, 170, 0);
+    lv_obj_set_style_pad_left(s_weatherTitle, 8, 0);
+    lv_obj_set_style_pad_right(s_weatherTitle, 8, 0);
+    lv_obj_set_style_pad_top(s_weatherTitle, 2, 0);
+    lv_obj_set_style_pad_bottom(s_weatherTitle, 2, 0);
+    lv_obj_set_style_radius(s_weatherTitle, 8, 0);
+    s_weatherNow = lv_label_create(wp);
+    lv_obj_set_width(s_weatherNow, 330);
+    lv_obj_set_style_text_font(s_weatherNow, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_weatherNow, UI_INK, 0);
+    lv_obj_set_style_text_align(s_weatherNow, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_weatherNow, "Forecast unavailable");
+    lv_obj_align(s_weatherNow, LV_ALIGN_TOP_MID, 0, 64);
+
+    s_weatherMeta = lv_label_create(wp);
+    lv_obj_set_width(s_weatherMeta, 380);
+    lv_obj_set_style_text_font(s_weatherMeta, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_weatherMeta, UI_SOFT, 0);
+    lv_obj_set_style_text_align(s_weatherMeta, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_weatherMeta, "Waiting for WiFi data...");
+    lv_obj_align(s_weatherMeta, LV_ALIGN_TOP_MID, 0, 150);
+
+    s_weatherDays = lv_label_create(wp);
+    lv_obj_set_width(s_weatherDays, 390);
+    lv_obj_set_style_text_font(s_weatherDays, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_weatherDays, UI_GREEN, 0);
+    lv_obj_set_style_text_align(s_weatherDays, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_text(s_weatherDays, "");
+    lv_obj_align(s_weatherDays, LV_ALIGN_TOP_LEFT, 42, 234);
+    // Legacy formatted labels are retained only to avoid touching older data-update
+    // plumbing; the redesigned forecast uses independent aligned objects below.
+    lv_obj_add_flag(s_weatherNow, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_weatherMeta, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_weatherDays, LV_OBJ_FLAG_HIDDEN);
+
+    // Default mode: genuine precipitation radar with aviation-style overlays.
+    s_wxAirport = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_wxAirport, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_wxAirport, UI_SOFT, 0);
+    lv_obj_set_style_bg_color(s_wxAirport, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_wxAirport, 160, 0);
+    lv_obj_set_style_pad_left(s_wxAirport, 6, 0);
+    lv_obj_set_style_pad_right(s_wxAirport, 6, 0);
+    lv_obj_set_style_radius(s_wxAirport, 6, 0);
+    lv_label_set_text(s_wxAirport, "RADAR CENTRE");
+    lv_obj_align(s_wxAirport, LV_ALIGN_TOP_MID, 0, 46);
+
+    s_wxCanvas = lv_canvas_create(wp);
+    lv_obj_set_size(s_wxCanvas, WX_RADAR_SIZE, WX_RADAR_SIZE);
+    lv_obj_align(s_wxCanvas, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_wxCanvas, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_background(s_wxCanvas);
+
+    s_wxStatus = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_wxStatus, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_wxStatus, UI_DIM, 0);
+    lv_label_set_text(s_wxStatus, "ACQUIRING WX RADAR...");
+    lv_obj_align(s_wxStatus, LV_ALIGN_TOP_MID, 0, 222);
+
+    const int ringSize[3] = { 360, 240, 120 };
+    for (int i = 0; i < 3; ++i) {
+        s_wxRings[i] = lv_obj_create(wp);
+        lv_obj_remove_style_all(s_wxRings[i]);
+        lv_obj_set_size(s_wxRings[i], ringSize[i], ringSize[i]);
+        lv_obj_align(s_wxRings[i], LV_ALIGN_TOP_MID, 0, 52 + (360 - ringSize[i]) / 2);
+        lv_obj_set_style_radius(s_wxRings[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_color(s_wxRings[i], UI_GREEN, 0);
+        lv_obj_set_style_border_opa(s_wxRings[i], i == 0 ? 180 : 90, 0);
+        lv_obj_set_style_border_width(s_wxRings[i], 1, 0);
+        lv_obj_clear_flag(s_wxRings[i], LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    }
+    s_wxNorth = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_wxNorth, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_wxNorth, UI_GREEN, 0);
+    lv_label_set_text(s_wxNorth, "N");
+    lv_obj_align(s_wxNorth, LV_ALIGN_TOP_MID, 0, 58);
+    s_wxCenter = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_wxCenter, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_wxCenter, UI_INK, 0);
+    lv_label_set_text(s_wxCenter, "+");
+    lv_obj_align(s_wxCenter, LV_ALIGN_TOP_MID, 0, 219);
+    s_wxRange = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_wxRange, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_wxRange, UI_GREEN, 0);
+    lv_label_set_text(s_wxRange, "75 KM");
+    lv_obj_align(s_wxRange, LV_ALIGN_TOP_MID, 128, 225);
+
+    s_wxFooter = lv_label_create(wp);
+    lv_obj_set_width(s_wxFooter, 360);
+    lv_obj_set_style_text_font(s_wxFooter, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_wxFooter, UI_INK, 0);
+    lv_obj_set_style_text_align(s_wxFooter, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_wxFooter, "WEATHER DATA PENDING");
+    lv_obj_align(s_wxFooter, LV_ALIGN_TOP_MID, 0, 326);
+    lv_obj_set_style_bg_color(s_wxFooter, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_wxFooter, 185, 0);
+    lv_obj_set_style_pad_hor(s_wxFooter, 8, 0);
+    lv_obj_set_style_radius(s_wxFooter, 7, 0);
+    s_wxMeta = lv_label_create(wp);
+    lv_obj_set_width(s_wxMeta, 360);
+    lv_obj_set_style_text_font(s_wxMeta, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_wxMeta, UI_SOFT, 0);
+    lv_obj_set_style_text_align(s_wxMeta, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_wxMeta, "");
+    lv_obj_align(s_wxMeta, LV_ALIGN_TOP_MID, 0, 351);
+    lv_obj_set_style_bg_color(s_wxMeta, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_wxMeta, 185, 0);
+    lv_obj_set_style_pad_hor(s_wxMeta, 8, 0);
+    lv_obj_set_style_radius(s_wxMeta, 7, 0);
+    s_wxAttrib = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_wxAttrib, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_wxAttrib, UI_DIM, 0);
+    lv_label_set_text(s_wxAttrib, "WAITING FOR RADAR DATA");
+    lv_obj_align(s_wxAttrib, LV_ALIGN_TOP_MID, 0, 376);
+    lv_obj_set_style_bg_color(s_wxAttrib, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_wxAttrib, 170, 0);
+    lv_obj_set_style_pad_hor(s_wxAttrib, 6, 0);
+    lv_obj_set_style_radius(s_wxAttrib, 6, 0);
+
+    // Forecast mode: independent, aligned objects instead of a tiny text table.
+    s_fcCurrent = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_fcCurrent, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_fcCurrent, UI_INK, 0);
+    lv_label_set_text(s_fcCurrent, "-- C");
+    lv_obj_align(s_fcCurrent, LV_ALIGN_TOP_MID, 0, 68);
+    s_fcCondition = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_fcCondition, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_fcCondition, UI_SOFT, 0);
+    lv_label_set_text(s_fcCondition, "Waiting for data");
+    lv_obj_align(s_fcCondition, LV_ALIGN_TOP_MID, 0, 105);
+
+    const char *metricNames[3] = { "FEELS", "HUMIDITY", "WIND" };
+    const int colX[3] = { -122, 0, 122 };
+    for (int i = 0; i < 3; ++i) {
+        s_fcMetricName[i] = lv_label_create(wp);
+        lv_obj_set_style_text_font(s_fcMetricName[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(s_fcMetricName[i], UI_DIM, 0);
+        lv_label_set_text(s_fcMetricName[i], metricNames[i]);
+        lv_obj_align(s_fcMetricName[i], LV_ALIGN_TOP_MID, colX[i], 150);
+        s_fcMetricValue[i] = lv_label_create(wp);
+        lv_obj_set_style_text_font(s_fcMetricValue[i], &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(s_fcMetricValue[i], UI_INK, 0);
+        lv_label_set_text(s_fcMetricValue[i], "-");
+        lv_obj_align(s_fcMetricValue[i], LV_ALIGN_TOP_MID, colX[i], 170);
+
+        s_fcDay[i] = lv_label_create(wp);
+        lv_obj_set_style_text_font(s_fcDay[i], &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(s_fcDay[i], UI_GREEN, 0);
+        lv_label_set_text(s_fcDay[i], "---");
+        lv_obj_align(s_fcDay[i], LV_ALIGN_TOP_MID, colX[i], 226);
+        s_fcDayCondition[i] = lv_label_create(wp);
+        lv_obj_set_width(s_fcDayCondition[i], 116);
+        lv_obj_set_style_text_font(s_fcDayCondition[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(s_fcDayCondition[i], UI_SOFT, 0);
+        lv_obj_set_style_text_align(s_fcDayCondition[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(s_fcDayCondition[i], LV_LABEL_LONG_WRAP);
+        lv_label_set_text(s_fcDayCondition[i], "");
+        lv_obj_align(s_fcDayCondition[i], LV_ALIGN_TOP_MID, colX[i], 254);
+        s_fcDayTemp[i] = lv_label_create(wp);
+        lv_obj_set_style_text_font(s_fcDayTemp[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(s_fcDayTemp[i], UI_INK, 0);
+        lv_label_set_text(s_fcDayTemp[i], "");
+        lv_obj_align(s_fcDayTemp[i], LV_ALIGN_TOP_MID, colX[i], 292);
+        s_fcDayRain[i] = lv_label_create(wp);
+        lv_obj_set_style_text_font(s_fcDayRain[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(s_fcDayRain[i], lv_color_hex(0x4DDCFF), 0);
+        lv_label_set_text(s_fcDayRain[i], "");
+        lv_obj_align(s_fcDayRain[i], LV_ALIGN_TOP_MID, colX[i], 320);
+    }
+    s_fcUpdated = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_fcUpdated, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_fcUpdated, UI_DIM, 0);
+    lv_label_set_text(s_fcUpdated, "");
+    lv_obj_align(s_fcUpdated, LV_ALIGN_TOP_MID, 0, 365);
+
+    s_weatherModeBtn = lv_btn_create(wp);
+    lv_obj_set_size(s_weatherModeBtn, 164, 34);
+    lv_obj_align(s_weatherModeBtn, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_set_style_radius(s_weatherModeBtn, 17, 0);
+    lv_obj_set_style_bg_color(s_weatherModeBtn, UI_PANEL, 0);
+    lv_obj_set_style_border_color(s_weatherModeBtn, UI_GREEN, 0);
+    lv_obj_set_style_border_width(s_weatherModeBtn, 1, 0);
+    lv_obj_clear_flag(s_weatherModeBtn, LV_OBJ_FLAG_SCROLL_CHAIN);
+    lv_obj_add_event_cb(s_weatherModeBtn, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
+    s_weatherModeLbl = lv_label_create(s_weatherModeBtn);
+    lv_obj_set_style_text_font(s_weatherModeLbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_weatherModeLbl, UI_GREEN, 0);
+    lv_label_set_text(s_weatherModeLbl, "3-DAY FORECAST");
+    lv_obj_center(s_weatherModeLbl);
 
     lv_obj_set_tile_id(s_tv, 0, 0, LV_ANIM_OFF);
 

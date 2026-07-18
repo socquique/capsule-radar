@@ -68,3 +68,26 @@ void airports_draw(lv_draw_ctx_t *ctx, lv_color_t color, lv_opa_t opa) {
         }
     }
 }
+
+bool airports_nearest_iata(double lat, double lon, float maxKm,
+                           char iata[4], float *distKm, float *bearingDeg) {
+    if (iata) iata[0] = 0;
+    double best = maxKm;
+    int bestIdx = -1;
+    for (int i = 0; i < AIRPORT_NUM; ++i) {
+        if (!AIRPORT_IATA[i][0]) continue;
+        const double alat = AIRPORT_LAT[i] / (double)AIRPORT_SCALE;
+        const double alon = AIRPORT_LON[i] / (double)AIRPORT_SCALE;
+        const double d = geo::haversineKm(lat, lon, alat, alon);
+        if (d < best) { best = d; bestIdx = i; }
+    }
+    if (bestIdx < 0) return false;
+    if (iata) memcpy(iata, AIRPORT_IATA[bestIdx], 4);
+    if (distKm) *distKm = (float)best;
+    if (bearingDeg) {
+        const double alat = AIRPORT_LAT[bestIdx] / (double)AIRPORT_SCALE;
+        const double alon = AIRPORT_LON[bestIdx] / (double)AIRPORT_SCALE;
+        *bearingDeg = (float)geo::bearingDeg(lat, lon, alat, alon);
+    }
+    return true;
+}

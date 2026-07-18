@@ -80,7 +80,16 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
     http.addHeader("Accept", "application/json");
 
     const int code = http.GET();
-    if (code != 200) { Serial.printf("[adsb] HTTP %d (%s)\n", code, host); http.end(); return false; }
+    if (code != 200) {
+        char tls[128] = "";
+        const int tlsCode = client.lastError(tls, sizeof(tls));
+        Serial.printf("[adsb] HTTP %d (%s) tls=%d '%s' heap=%u largest=%u psram=%u\n",
+                      code, host, tlsCode, tls,
+                      (unsigned)ESP.getFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                      (unsigned)ESP.getFreePsram());
+        http.end(); return false;
+    }
 
     // Only keep the fields we use -> much smaller parsed document.
     JsonDocument filter(&s_jsonPsram);

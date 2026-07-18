@@ -16,6 +16,9 @@
 #include "radar_view.h"
 #include "ui.h"
 #include "route.h"
+#include "weather.h"
+#include "wx_radar.h"
+#include "cloud_image.h"
 #include "aircraft.h"
 #include <vector>
 #include <cmath>
@@ -167,6 +170,65 @@ int main(int argc, char **argv) {
     mock_init();
     radar::update(g_mockAcs, g_set);
     ui_on_data_updated();
+    WeatherSnapshot forecast = {};
+    forecast.valid = true;
+    snprintf(forecast.updated, sizeof(forecast.updated), "14:00");
+    forecast.code = 1; forecast.tempC = 27; forecast.feelsC = 29;
+    forecast.humidity = 61; forecast.windKmh = 18; forecast.windDeg = 85;
+    const char *dates[] = {"2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11"};
+    const int codes[] = {1, 2, 61, 0};
+    const float lows[] = {20, 19, 18, 21}, highs[] = {28, 27, 24, 29};
+    const int rain[] = {10, 20, 75, 5};
+    forecast.dayCount = 4;
+    for (int i = 0; i < 4; ++i) {
+        snprintf(forecast.days[i].date, sizeof(forecast.days[i].date), "%s", dates[i]);
+        forecast.days[i].code = codes[i]; forecast.days[i].tempMinC = lows[i];
+        forecast.days[i].tempMaxC = highs[i]; forecast.days[i].rainChance = rain[i];
+    }
+    weather_store(forecast);
+    wx_radar_begin();
+    if (uint16_t *wx = wx_radar_back_buffer()) {
+        for (int y = 0; y < WX_RADAR_SIZE; ++y) for (int x = 0; x < WX_RADAR_SIZE; ++x) {
+            const int centre = WX_RADAR_SIZE / 2;
+            const int dx = x - centre, dy = y - centre;
+            uint16_t c = 0;
+            if (dx * dx + dy * dy < (centre - 2) * (centre - 2)) {
+                const int a = (x - 250) * (x - 250) + (y - 115) * (y - 115);
+                const int b = (x - 105) * (x - 105) + (y - 245) * (y - 245);
+                if (a < 1500) c = a < 350 ? 0xFBE0 : (a < 800 ? 0xFFE0 : 0x07E0);
+                if (b < 900) c = b < 250 ? 0xF800 : 0x07E0;
+            }
+            wx[y * WX_RADAR_SIZE + x] = c;
+        }
+        wx_radar_commit(1784397600UL, HOME_LAT_DEFAULT, HOME_LON_DEFAULT);
+    }
+    // Representative Meteosat-style mock. The native simulator has no network
+    // clients, so populate the shared satellite buffer with a dark Earth field
+    // and layered cloud bands that exercise the exact same UI path as hardware.
+    cloud_image_begin();
+    if (uint16_t *sat = cloud_image_back_buffer()) {
+        const int centre = WX_RADAR_SIZE / 2;
+        for (int y = 0; y < WX_RADAR_SIZE; ++y) for (int x = 0; x < WX_RADAR_SIZE; ++x) {
+            const int dx = x - centre, dy = y - centre;
+            uint16_t c = 0;
+            if (dx * dx + dy * dy < (centre - 2) * (centre - 2)) {
+                const float wave1 = y - (116.0f + 0.42f * x + 20.0f * sinf(x * 0.035f));
+                const float wave2 = y - (320.0f - 0.52f * x + 14.0f * sinf(x * 0.055f));
+                const float cloud = expf(-(wave1 * wave1) / 950.0f) +
+                                    0.75f * expf(-(wave2 * wave2) / 620.0f);
+                const float texture = 0.72f + 0.28f * sinf(x * 0.19f + y * 0.11f) *
+                                                       sinf(x * 0.047f - y * 0.16f);
+                const float v = fminf(1.0f, cloud * texture);
+                const int r = (int)(8 + 235 * v);
+                const int g = (int)(23 + 225 * v);
+                const int b = (int)(42 + 205 * v);
+                c = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+            }
+            sat[y * WX_RADAR_SIZE + x] = c;
+        }
+        cloud_image_commit(1784397900UL, HOME_LAT_DEFAULT, HOME_LON_DEFAULT);
+    }
+    ui_on_data_updated();
     printf("[sim] Capsule Radar simulator running (%dx%d) with 6 mock aircraft.\n", SIM_W, SIM_H);
 
     Uint32 last = SDL_GetTicks();
@@ -240,7 +302,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        // headless screenshot mode (--shot <prefix>): settle, then grab all 3 views
+        // headless screenshot mode (--shot <prefix>): settle, then grab all views/themes
         if (shotPath && now - start > 4000) {
             for (int k = 0; k < 150; ++k) {              // fast-forward to build up the flow map
                 mock_step(1.0);
@@ -252,17 +314,20 @@ int main(int argc, char **argv) {
             ui_on_data_updated();                        // pick up the mock route for the card
             int ow, oh;
             SDL_GetRendererOutputSize(s_ren, &ow, &oh);
-            struct Shot { const char *name; int view; int theme; };
-            const Shot shots[6] = {
-                { "radar",  0, THEME_PHOSPHOR },
-                { "orb", 0, THEME_ORB   },
-                { "amber",  0, THEME_AMBER    },
-                { "military",0, THEME_MILITARY },
-                { "list",   1, THEME_PHOSPHOR },
-                { "stats",  2, THEME_PHOSPHOR },
+            struct Shot { const char *name; int view; int theme; bool forecast; };
+            const Shot shots[8] = {
+                { "radar",  0, THEME_PHOSPHOR, false },
+                { "orb", 0, THEME_ORB, false },
+                { "amber",  0, THEME_AMBER, false },
+                { "military",0, THEME_MILITARY, false },
+                { "list",   1, THEME_PHOSPHOR, false },
+                { "stats",  2, THEME_PHOSPHOR, false },
+                { "weather",3, THEME_PHOSPHOR, false },
+                { "forecast",3, THEME_PHOSPHOR, true },
             };
-            for (int v = 0; v < 6; ++v) {
+            for (int v = 0; v < 8; ++v) {
                 radar::setTheme(shots[v].theme);
+                ui_set_weather_forecast(shots[v].forecast);
                 ui_show_view(shots[v].view);
                 lv_refr_now(NULL);                       // force the view into the buffer
                 SDL_RenderClear(s_ren);
