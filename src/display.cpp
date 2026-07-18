@@ -132,15 +132,21 @@ static void flush_arbitrary(const lv_area_t *area) {
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
     const int w = (int)(area->x2 - area->x1 + 1);
     const int h = (int)(area->y2 - area->y1 + 1);
-    if (s_frameBuf) {
+    const uint16_t angle = s_rot;
+    const bool arbitrary = (angle != 0 && angle != 90 && angle != 180 && angle != 270);
+    // Mirror into the logical framebuffer ONLY at non-cardinal angles (it's what
+    // flush_arbitrary samples from). At 0/90/180/270 this copy would be pure overhead
+    // on every frame for every user; skipping it keeps those paths exactly as before.
+    // Switching TO an arbitrary angle invalidates the whole screen (see setRotation),
+    // so the framebuffer is fully repopulated before it is ever sampled.
+    if (arbitrary && s_frameBuf) {
         for (int row = 0; row < h; ++row) {
             memcpy(s_frameBuf + (area->y1 + row) * SCREEN_W + area->x1,
                    px + row * w, (size_t)w * sizeof(lv_color_t));
         }
     }
 
-    const uint16_t angle = s_rot;
-    if (angle != 0 && angle != 90 && angle != 180 && angle != 270 && s_frameBuf && s_rotBuf) {
+    if (arbitrary && s_frameBuf && s_rotBuf) {
         flush_arbitrary(area);
         if (lv_disp_flush_is_last(drv)) s_frameCount++;
         lv_disp_flush_ready(drv);
