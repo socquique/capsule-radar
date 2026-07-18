@@ -1,5 +1,6 @@
 #include "wx_radar_client.h"
 #include "wx_radar.h"
+#include "net_fetch.h"
 #include "config.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -102,31 +103,39 @@ bool wx_radar_fetch(double lat, double lon) {
     char url[320];
     snprintf(url, sizeof(url), "%s%s/512/7/%.5f/%.5f/2/1_1.png",
              host, path, lat, lon);
-    String image;
-    if (!https_get_string(url, image, 8500)) { Serial.println("[wxradar] tile fetch failed"); return false; }
+    // Stream the tile straight into PSRAM (net_fetch): a 512px PNG can be 100+ KB, and an
+    // internal-heap String that big starves the live feed's TLS handshake.
+    uint8_t *image = nullptr; size_t imageLen = 0;
+    if (!net_fetch_psram(url, ADSB_USER_AGENT, &image, &imageLen, 260000, 3500, 8500)) {
+        Serial.println("[wxradar] tile fetch failed"); return false;
+    }
     memset(wx_radar_back_buffer(), 0, WX_RADAR_SIZE * WX_RADAR_SIZE * sizeof(uint16_t));
     s_decodedPixels = 0;
     s_sourcePixels = 0;
     s_minX = s_minY = WX_RADAR_SOURCE_SIZE;
     s_maxX = s_maxY = -1;
-    const int opened = s_png->openRAM((uint8_t *)image.c_str(), image.length(), radar_png_line);
-    if (opened != PNG_SUCCESS) { Serial.printf("[wxradar] PNG open error %d\n", opened); return false; }
+    const int opened = s_png->openRAM(image, imageLen, radar_png_line);
+    if (opened != PNG_SUCCESS) {
+        Serial.printf("[wxradar] PNG open error %d\n", opened);
+        heap_caps_free(image); return false;
+    }
     Serial.printf("[wxradar] PNG %dx%d bpp=%d type=%d alpha=%d\n",
                   s_png->getWidth(), s_png->getHeight(), s_png->getBpp(),
                   s_png->getPixelType(), s_png->hasAlpha());
     if (s_png->getWidth() != WX_RADAR_SOURCE_SIZE || s_png->getHeight() != WX_RADAR_SOURCE_SIZE) {
         Serial.println("[wxradar] unexpected tile dimensions");
-        s_png->close(); return false;
+        s_png->close(); heap_caps_free(image); return false;
     }
     const int decoded = s_png->decode(nullptr, 0);
     s_png->close();
+    heap_caps_free(image);           // PNG fully decoded (or failed) — buffer no longer needed
     if (decoded != PNG_SUCCESS) { Serial.printf("[wxradar] PNG decode error %d\n", decoded); return false; }
     if (s_decodedPixels == 0) {
         Serial.println("[wxradar] decoded tile is empty (0 coloured pixels)");
     }
     wx_radar_commit(frameTime, lat, lon);
     Serial.printf("[wxradar] frame %lu updated (%u bytes, source=%lu bbox=%d,%d-%d,%d crop=%lu)\n",
-                  (unsigned long)frameTime, (unsigned)image.length(),
+                  (unsigned long)frameTime, (unsigned)imageLen,
                   (unsigned long)s_sourcePixels, s_minX, s_minY, s_maxX, s_maxY,
                   (unsigned long)s_decodedPixels);
     return true;

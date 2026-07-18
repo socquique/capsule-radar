@@ -1,6 +1,7 @@
 #include "cloud_image_client.h"
 #include "cloud_image.h"
 #include "config.h"
+#include "net_fetch.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -30,29 +31,13 @@ static bool cloud_jpg_out(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t
 }
 
 static bool get_jpeg(const char *url, uint8_t **out, size_t *outLen) {
-    *out = nullptr; *outLen = 0;
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-    http.setReuse(false);
-    http.setConnectTimeout(4500);
-    http.setTimeout(12000);
-    if (!http.begin(client, url)) return false;
-    http.setUserAgent(ADSB_USER_AGENT);
-    const int status = http.GET();
-    if (status != 200) {
-        char tls[96] = "";
-        const int tlsCode = client.lastError(tls, sizeof(tls));
-        Serial.printf("[clouds] HTTP %d tls=%d '%s'\n", status, tlsCode, tls);
-        http.end(); return false;
+    // Streamed straight into PSRAM (net_fetch): a satellite JPEG can be 100+ KB, and
+    // buffering it in an internal-heap String starves the TLS handshake of the live feed.
+    if (!net_fetch_psram(url, ADSB_USER_AGENT, out, outLen, 180000, 4500, 12000)) {
+        Serial.println("[clouds] download failed");
+        return false;
     }
-    String body = http.getString();
-    http.end();
-    if (body.length() < 100 || body.length() > 180000) return false;
-    uint8_t *buf = (uint8_t *)heap_caps_malloc(body.length(), MALLOC_CAP_SPIRAM);
-    if (!buf) return false;
-    memcpy(buf, body.c_str(), body.length());
-    *out = buf; *outLen = body.length();
+    if (*outLen < 100) { heap_caps_free(*out); *out = nullptr; *outLen = 0; return false; }
     return true;
 }
 
