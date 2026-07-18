@@ -10,3 +10,8 @@ void airports_project(double homeLat, double homeLon, double rangeKm,
                       float cx, float cy, float rOuterPx);
 
 void airports_draw(lv_draw_ctx_t *ctx, lv_color_t color, lv_opa_t opa);
+
+// Find the nearest recognizable airport (one with an IATA code). Used by the
+// weather view for aviation context; entirely offline from the embedded data.
+bool airports_nearest_iata(double lat, double lon, float maxKm,
+                           char iata[4], float *distKm, float *bearingDeg);

@@ -11,6 +11,12 @@
 #include "route_client.h"
 #include "photo.h"
 #include "photo_client.h"
+#include "weather.h"
+#include "weather_client.h"
+#include "wx_radar.h"
+#include "wx_radar_client.h"
+#include "cloud_image.h"
+#include "cloud_image_client.h"
 #include "radar_view.h"
 #include "ui.h"
 #include "display.h"                  // M0: CO5300 + LVGL bring-up
@@ -64,6 +70,9 @@ static volatile bool         g_feedOk = true;                        // ADS-B fe
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
+static volatile bool         g_weatherDirty = false;
+static volatile bool         g_wxRadarDirty = false;
+static volatile bool         g_cloudImageDirty = false;
 
 // Web-selectable time zones (label + POSIX TZ). The <option> value is the index; the save
 // handler maps it back to the POSIX string stored in NVS and used by configTzTime at boot.
@@ -96,6 +105,9 @@ static void adsb_task(void*) {
     std::vector<Aircraft> fresh;
     bool wasConnected = false;
     uint32_t lastPoll = 0;
+    uint32_t nextWeatherAt = UINT32_MAX;       // armed five seconds after WiFi connects
+    uint32_t nextWxRadarAt = UINT32_MAX;
+    uint32_t nextCloudImageAt = UINT32_MAX;
     uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
@@ -106,6 +118,9 @@ static void adsb_task(void*) {
             Serial.printf("[adsb] WiFi up, IP %s\n", WiFi.localIP().toString().c_str());
             configTzTime(g_tz.c_str(), "pool.ntp.org", "time.nist.gov");  // local time (web-configurable TZ)
             Serial.println("[web] config: http://capsuleradar.local/  (or the IP above)");
+            nextWeatherAt = millis() + 5000UL; // let the first ADS-B poll complete before weather TLS
+            nextCloudImageAt = millis() + 15000UL;
+            nextWxRadarAt = millis() + 12000UL;
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
         }
         wasConnected = conn;
@@ -147,6 +162,41 @@ static void adsb_task(void*) {
                 } else {
                     Serial.println("[adsb] poll failed");
                     if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
+                }
+            }
+            // Forecasts change slowly. Fetch only after the live ADS-B poll has had priority.
+            if ((int32_t)(nowMs - nextWeatherAt) >= 0) {
+                Serial.printf("[weather] fetching %.5f, %.5f...\n",
+                              g_settings.homeLat, g_settings.homeLon);
+                WeatherSnapshot forecast;
+                if (weather_fetch(g_settings.homeLat, g_settings.homeLon, forecast)) {
+                    weather_store(forecast);
+                    g_weatherDirty = true;
+                    nextWeatherAt = millis() + WEATHER_REFRESH_MS;
+                    Serial.println("[weather] forecast updated");
+                } else {
+                    nextWeatherAt = millis() + 60000UL;
+                    Serial.println("[weather] fetch failed; retrying in 60s");
+                }
+            }
+            if ((int32_t)(nowMs - nextWxRadarAt) >= 0) {
+                Serial.println("[wxradar] fetching latest frame...");
+                if (wx_radar_fetch(g_settings.homeLat, g_settings.homeLon)) {
+                    g_wxRadarDirty = true;
+                    nextWxRadarAt = millis() + WX_RADAR_REFRESH_MS;
+                } else {
+                    nextWxRadarAt = millis() + 60000UL;
+                    Serial.println("[wxradar] fetch failed; retrying in 60s");
+                }
+            }
+            if ((int32_t)(nowMs - nextCloudImageAt) >= 0) {
+                Serial.println("[clouds] fetching EUMETSAT frame...");
+                if (cloud_image_fetch(g_settings.homeLat, g_settings.homeLon)) {
+                    g_cloudImageDirty = true;
+                    nextCloudImageAt = millis() + CLOUD_IMAGE_REFRESH_MS;
+                } else {
+                    nextCloudImageAt = millis() + 60000UL;
+                    Serial.println("[clouds] fetch failed; retrying in 60s");
                 }
             }
             // Then the on-demand lookups for the selected aircraft. Their timeouts are kept
@@ -904,6 +954,8 @@ void setup() {
     // --- ADS-B client + task ----------------------------------------------
     float queryKm = queryRadiusKm();
     g_adsb.begin(g_settings.homeLat, g_settings.homeLon, queryKm);
+    wx_radar_begin();
+    cloud_image_begin();
     g_ac_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(adsb_task, "adsb", 16384, nullptr, 1, nullptr, 0);  // TLS needs a big stack
 
@@ -970,6 +1022,18 @@ void loop() {
             checkAudioEvents();                // ping new-in-range / emergency / military
         }
     }
+    if (g_weatherDirty) {
+        g_weatherDirty = false;
+        ui_on_data_updated();
+    }
+    if (g_wxRadarDirty) {
+        g_wxRadarDirty = false;
+        ui_on_data_updated();
+    }
+    if (g_cloudImageDirty) {
+        g_cloudImageDirty = false;
+        ui_on_data_updated();
+    }
 
     // periodic: HUD clock + wifi/battery indicators
     static uint32_t lastStatus = 0;
@@ -1005,7 +1069,7 @@ void loop() {
         char net[112];
         if (WiFi.status() == WL_CONNECTED)
             // IP + the active centre point (helps users verify what actually got saved)
-            snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s  \xc2\xb7  %.5f, %.5f",
+            snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s  |  %.5f, %.5f",
                      WiFi.localIP().toString().c_str(), g_settings.homeLat, g_settings.homeLon);
         else
             snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
