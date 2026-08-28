@@ -319,7 +319,7 @@ int main(int argc, char **argv) {
             int ow, oh;
             SDL_GetRendererOutputSize(s_ren, &ow, &oh);
             struct Shot { const char *name; int view; int theme; bool forecast; bool card; int gps; };
-            const Shot shots[10] = {
+            const Shot shots[11] = {
                 { "radar",  0, THEME_PHOSPHOR, false, true, 0 },
                 { "orb", 0, THEME_ORB, false, true, 0 },
                 { "amber",  0, THEME_AMBER, false, true, 0 },
@@ -327,15 +327,17 @@ int main(int argc, char **argv) {
                 // TCAS shots mirror the proposal's examples: GPS fix + heading-up 250, and GPS LOST
                 { "tcas",     0, THEME_TCAS, false, false, 2 },
                 { "tcaslost", 0, THEME_TCAS, false, false, 1 },
+                { "tcasoff",  0, THEME_TCAS, false, false, 0 },
                 { "list",   1, THEME_PHOSPHOR, false, true, 0 },
                 { "stats",  2, THEME_PHOSPHOR, false, true, 0 },
                 { "weather",3, THEME_PHOSPHOR, false, true, 0 },
                 { "forecast",3, THEME_PHOSPHOR, true, true, 0 },
             };
-            for (int v = 0; v < 10; ++v) {
+            for (int v = 0; v < 11; ++v) {
                 radar::setTheme(shots[v].theme);
                 radar::select(shots[v].card ? 0 : -1);
                 radar::setGpsStatus(shots[v].gps, 16, 360.0f);
+                radar::setNetStatus(true, true);
                 g_set.rotationDeg = (shots[v].gps == 2) ? 250.0 : 0.0;
                 radar::update(g_mockAcs, g_set);
                 ui_on_data_updated();

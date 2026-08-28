@@ -227,6 +227,16 @@ static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
 
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
 
+// The TCAS theme cycles round nautical-mile ranges (proposal); other themes use the km steps.
+static int range_step_count(void) {
+    return radar::theme() == THEME_TCAS
+        ? (int)(sizeof(RANGE_STEPS_TCAS_NM) / sizeof(RANGE_STEPS_TCAS_NM[0]))
+        : (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
+}
+static float range_step_km(int i) {
+    return radar::theme() == THEME_TCAS ? RANGE_STEPS_TCAS_NM[i] * 1.852f : RANGE_STEPS_KM[i];
+}
+
 static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cancel on the tileview)
     (void)e;
     static uint32_t last = 0;
@@ -234,9 +244,8 @@ static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cance
     if (now - last < 250) return;      // debounce repeated/held presses
     last = now;
     if (!s_rangeCb) return;
-    const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
-    s_rangeIdx = (s_rangeIdx + 1) % n;
-    s_rangeCb(RANGE_STEPS_KM[s_rangeIdx]);
+    s_rangeIdx = (s_rangeIdx + 1) % range_step_count();
+    s_rangeCb(range_step_km(s_rangeIdx));
 }
 
 void ui_set_range_km(float km) {
@@ -247,8 +256,8 @@ void ui_set_range_km(float km) {
         lv_label_set_text(s_zoomLbl, b);
     }
     int best = 0; float bd = 1e9f;                 // sync the cycle index to the shown range
-    const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
-    for (int i = 0; i < n; ++i) { float d = km - RANGE_STEPS_KM[i]; if (d < 0) d = -d; if (d < bd) { bd = d; best = i; } }
+    const int n = range_step_count();
+    for (int i = 0; i < n; ++i) { float d = km - range_step_km(i); if (d < 0) d = -d; if (d < bd) { bd = d; best = i; } }
     s_rangeIdx = best;
 }
 
@@ -296,6 +305,14 @@ void ui_set_status(bool wifiUp, bool feedOk, int rssi, const char *clock) {
         lv_obj_set_style_bg_opa(s_hudBars[i], (i < level) ? LV_OPA_COVER : 45, 0);
     }
     if (s_hudClock && clock) lv_label_set_text(s_hudClock, clock);
+    // TCAS theme: the range pill mirrors the connection state (proposal — green when
+    // connected, red when offline); other themes keep the standard green.
+    if (s_zoomLbl) {
+        const lv_color_t zc = (radar::theme() == THEME_TCAS)
+            ? (!wifiUp ? UI_EMERG : (feedOk ? UI_GREEN : lv_color_hex(0xFFB23C)))
+            : UI_GREEN;
+        lv_obj_set_style_text_color(s_zoomLbl, zc, 0);
+    }
 }
 
 void ui_set_battery(int pct, bool charging, bool present) {

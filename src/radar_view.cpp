@@ -12,6 +12,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <string>
 #include <map>
 #include <set>
@@ -141,6 +142,9 @@ static double s_rotDeg     = 0.0;               // scope rotation (heading-up); 
 static int    s_gpsState   = 0;                 // TCAS readouts: 0 = GPS off, 1 = lost, 2 = fix
 static int    s_gpsSats    = 0;
 static float  s_gpsAltM    = NAN;
+static double s_homeLat    = 0.0, s_homeLon = 0.0;   // shown on the scope when GPS is off (TCAS)
+static bool   s_blink      = true;              // GPS LOST flashes (proposal); toggled by the timer
+static bool   s_netWifi    = true, s_netFresh = true;   // tint for the TCAS TIME readout
 
 static void show(lv_obj_t *o, bool v) {
     if (!o) return;
@@ -319,24 +323,57 @@ static void grid_draw_cb(lv_event_t *e) {
             lv_draw_label(d, &bt, &bl, hb, NULL);
         }
 
-        if (s_gpsState > 0) {                              // GPS readouts (ALT / GPS LEV) top-left
+        {                                                  // top-left readouts
             lv_draw_label_dsc_t gt;
             lv_draw_label_dsc_init(&gt);
             gt.font = &lv_font_montserrat_12;
-            gt.color = cStat;
-            char l1[28], l2[20];
-            if (!gpsLost && s_gpsAltM == s_gpsAltM)
-                snprintf(l1, sizeof(l1), "ALT %.0fft (%.0fm)", (double)(s_gpsAltM * 3.28084f), (double)s_gpsAltM);
-            else
-                snprintf(l1, sizeof(l1), "ALT --");
-            snprintf(l2, sizeof(l2), "GPS LEV %d", s_gpsSats);
             lv_area_t a1 = { (lv_coord_t)(s_cx - 178), (lv_coord_t)(s_cy - 122),
                              (lv_coord_t)(s_cx - 30),  (lv_coord_t)(s_cy - 106) };
             lv_area_t a2 = { a1.x1, (lv_coord_t)(a1.y1 + 18), a1.x2, (lv_coord_t)(a1.y2 + 18) };
-            lv_draw_label(d, &gt, &a1, l1, NULL);
-            lv_draw_label(d, &gt, &a2, l2, NULL);
+            if (s_gpsState > 0) {                          // GPS on: ALT + satellite count
+                gt.color = cStat;
+                char l1[28], l2[20];
+                if (!gpsLost && s_gpsAltM == s_gpsAltM)
+                    snprintf(l1, sizeof(l1), "ALT %.0fft (%.0fm)", (double)(s_gpsAltM * 3.28084f), (double)s_gpsAltM);
+                else
+                    snprintf(l1, sizeof(l1), "ALT --");
+                snprintf(l2, sizeof(l2), "GPS LEV %d", s_gpsSats);
+                lv_draw_label(d, &gt, &a1, l1, NULL);
+                lv_draw_label(d, &gt, &a2, l2, NULL);
+            } else {                                       // GPS off: the configured position + OFF
+                gt.color = TCAS_CHROME;
+                char l1[24], l2[24];
+                snprintf(l1, sizeof(l1), "LAT %.4f", s_homeLat);
+                snprintf(l2, sizeof(l2), "LON %.4f", s_homeLon);
+                lv_area_t a3 = { a1.x1, (lv_coord_t)(a1.y1 + 36), a1.x2, (lv_coord_t)(a1.y2 + 36) };
+                lv_draw_label(d, &gt, &a1, l1, NULL);
+                lv_draw_label(d, &gt, &a2, l2, NULL);
+                lv_draw_label(d, &gt, &a3, "GPS OFF", NULL);
+            }
+        }
 
-            lv_draw_rect_dsc_t sb;                         // GPS FIXED / GPS LOST status box
+        {                                                  // TIME readout, top-right (proposal colours:
+            lv_draw_label_dsc_t tt;                        //  green fresh / amber stale / red offline)
+            lv_draw_label_dsc_init(&tt);
+            tt.font = &lv_font_montserrat_12;
+            tt.color = !s_netWifi ? cBad : (s_netFresh ? cOk : lv_color_hex(0xFFB23C));
+            tt.align = LV_TEXT_ALIGN_RIGHT;
+            char tl[20];
+            const time_t now = time(nullptr);
+            if (now > 1700000000L) {
+                struct tm lt;
+                localtime_r(&now, &lt);
+                snprintf(tl, sizeof(tl), "TIME %02d:%02d", lt.tm_hour, lt.tm_min);
+            } else {
+                snprintf(tl, sizeof(tl), "TIME --:--");
+            }
+            lv_area_t ta = { (lv_coord_t)(s_cx + 30), (lv_coord_t)(s_cy - 122),
+                             (lv_coord_t)(s_cx + 178), (lv_coord_t)(s_cy - 106) };
+            lv_draw_label(d, &tt, &ta, tl, NULL);
+        }
+
+        if (s_gpsState > 0 && (!gpsLost || s_blink)) {     // GPS FIXED / flashing GPS LOST box
+            lv_draw_rect_dsc_t sb;
             lv_draw_rect_dsc_init(&sb);
             sb.bg_color = lv_color_black(); sb.bg_opa = LV_OPA_COVER;
             sb.border_color = cStat; sb.border_width = 2; sb.border_opa = 255;
@@ -525,6 +562,16 @@ static void interp_step(void) {
 static void sweep_timer_cb(lv_timer_t *t) {
     (void)t;
     if (++s_frameCtr % 3 == 0) interp_step();         // smooth glyph motion (~90 ms cadence)
+    if (tcas()) {
+        // no sweep animation; drive the flashing "GPS LOST" box instead (~0.5 s cadence)
+        static int blinkCtr = 0;
+        if (s_gpsState == 1 && ++blinkCtr >= 16) {
+            blinkCtr = 0;
+            s_blink = !s_blink;
+            if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
+        }
+        return;
+    }
     if (orb()) {
         // animate the blip waves (invalidate only the ball areas)
         s_wavePhase += 0.05f;
@@ -684,14 +731,21 @@ static void ac_draw_cb(lv_event_t *e) {
                                 (lv_coord_t)(ac.pos.x + hr), (lv_coord_t)(ac.pos.y + hr) };
                 lv_draw_rect(d, &g, &a);
             }
-            if (ac.vsFpm == ac.vsFpm && fabsf(ac.vsFpm) >= 500.0f) {   // climb/descent trend arrow
+            if (ac.track == ac.track) {
+                // relative-direction arrow (proposal): the aircraft's motion relative to the
+                // vehicle's heading (scope-up) — same direction / right / opposite / left.
+                const float rel = fmodf(ac.track - (float)s_rotDeg + 360.0f, 360.0f);
+                const char *sym = (rel < 45.0f || rel >= 315.0f) ? LV_SYMBOL_UP
+                                : (rel < 135.0f)                 ? LV_SYMBOL_RIGHT
+                                : (rel < 225.0f)                 ? LV_SYMBOL_DOWN
+                                                                 : LV_SYMBOL_LEFT;
                 lv_draw_label_dsc_t vd;
                 lv_draw_label_dsc_init(&vd);
                 vd.font = &lv_font_montserrat_14;
                 vd.color = col;
                 lv_area_t va = { (lv_coord_t)(ac.pos.x + r + 3), (lv_coord_t)(ac.pos.y - 9),
                                  (lv_coord_t)(ac.pos.x + r + 21), (lv_coord_t)(ac.pos.y + 9) };
-                lv_draw_label(d, &vd, &va, ac.vsFpm > 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, NULL);
+                lv_draw_label(d, &vd, &va, sym, NULL);
             }
             {                                                     // callsign + altitude below, centred
                 lv_draw_label_dsc_t lc;
@@ -898,11 +952,18 @@ void setLargeText(bool on) {
 void setGpsStatus(int state, int sats, float altM) {
     const bool altSame = (altM == s_gpsAltM) || (altM != altM && s_gpsAltM != s_gpsAltM);
     if (state == s_gpsState && sats == s_gpsSats && altSame) return;
+    if (state != s_gpsState) s_blink = true;   // a fresh LOST starts visible
     s_gpsState = state; s_gpsSats = sats; s_gpsAltM = altM;
     if (tcas()) {                       // readouts live in the chrome + traffic layer
         if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
         if (s_acLayer)   lv_obj_invalidate(s_acLayer);
     }
+}
+
+void setNetStatus(bool wifiUp, bool feedFresh) {
+    if (wifiUp == s_netWifi && feedFresh == s_netFresh) return;
+    s_netWifi = wifiUp; s_netFresh = feedFresh;
+    if (tcas() && s_gridLayer) lv_obj_invalidate(s_gridLayer);   // TIME readout tint
 }
 
 void init(void *lv_parent) {
@@ -988,6 +1049,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     std::set<std::string> present;
     const float R = (float)RADAR_R_OUTER_PX;
     s_curRangeKm = s.rangeKm;                     // TCAS ring labels read this (grid repaints below on change)
+    s_homeLat = s.homeLat; s_homeLon = s.homeLon; // TCAS shows the position when GPS is off
     if (fabs(s.rotationDeg - s_rotDeg) > 0.5) {   // heading-up turned: the bezel must repaint
         s_rotDeg = s.rotationDeg;
         if (s_gridLayer) lv_obj_invalidate(s_gridLayer);

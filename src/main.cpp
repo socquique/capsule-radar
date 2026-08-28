@@ -1186,6 +1186,7 @@ void loop() {
         // freeze but the icon would otherwise stay white.
         const bool feedFresh = wifiUp && (millis() - g_lastFeedOkMs < 18000UL);
         ui_set_status(wifiUp, feedFresh, rssi, clk);
+        radar::setNetStatus(wifiUp, feedFresh);      // TCAS on-scope TIME readout tint
         char net[112];
         if (WiFi.status() == WL_CONNECTED)
             // IP + the active centre point (helps users verify what actually got saved)

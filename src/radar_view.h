@@ -74,7 +74,10 @@ void setMaxOnScreen(int n);                       // how many (nearest) aircraft
 void setLargeText(bool on);                       // accessibility: bigger glyph labels. Call BEFORE init()
 
 // TCAS theme: GPS status readouts drawn on the scope (ALT / GPS LEV / FIXED-LOST box).
-// state: 0 = GPS off (readouts hidden), 1 = no fix (GPS LOST: red X, traffic hidden), 2 = fix.
+// state: 0 = GPS off (shows the configured LAT/LON + "GPS OFF"), 1 = no fix (GPS LOST:
+// red X, traffic hidden), 2 = fix.
 void setGpsStatus(int state, int sats, float altM);
+// TCAS theme: network state for the on-scope TIME readout (green fresh / amber stale / red offline).
+void setNetStatus(bool wifiUp, bool feedFresh);
 
 } // namespace radar
