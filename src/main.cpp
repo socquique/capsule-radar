@@ -1200,6 +1200,15 @@ void loop() {
         // GPS HUD/Stats: 0 = off/no module (hidden), 1 = acquiring, 2 = fix
         const int gpsState = (!g_useGps || !gps_present()) ? 0 : (gps_has_fix() ? 2 : 1);
         ui_set_gps(gpsState, gps_satellites(), gps_altitude_m());
+        radar::setGpsStatus(gpsState, gps_satellites(), gps_altitude_m());   // TCAS scope readouts
+        // TCAS heading-up: rotate the scope to the GPS course while moving; hold the
+        // last heading while stopped (a car at a light shouldn't snap back to north).
+        if (radar::theme() == THEME_TCAS && gpsState == 2) {
+            const float crs = gps_course_deg(), spd = gps_speed_kmh();
+            if (crs == crs && spd == spd && spd > 5.0f) g_settings.rotationDeg = crs;
+        } else {
+            g_settings.rotationDeg = 0.0;
+        }
         // once NTP has a real fix, persist it to the RTC (core 1 only)
         if (!g_rtcSynced && time(nullptr) > 1700000000L) {
             time_t now = time(nullptr);

@@ -73,4 +73,8 @@ void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=lon
 void setMaxOnScreen(int n);                       // how many (nearest) aircraft to draw on the scope
 void setLargeText(bool on);                       // accessibility: bigger glyph labels. Call BEFORE init()
 
+// TCAS theme: GPS status readouts drawn on the scope (ALT / GPS LEV / FIXED-LOST box).
+// state: 0 = GPS off (readouts hidden), 1 = no fix (GPS LOST: red X, traffic hidden), 2 = fix.
+void setGpsStatus(int state, int sats, float altM);
+
 } // namespace radar

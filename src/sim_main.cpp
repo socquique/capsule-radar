@@ -318,21 +318,26 @@ int main(int argc, char **argv) {
             ui_on_data_updated();                        // pick up the mock route for the card
             int ow, oh;
             SDL_GetRendererOutputSize(s_ren, &ow, &oh);
-            struct Shot { const char *name; int view; int theme; bool forecast; bool card; };
-            const Shot shots[9] = {
-                { "radar",  0, THEME_PHOSPHOR, false, true },
-                { "orb", 0, THEME_ORB, false, true },
-                { "amber",  0, THEME_AMBER, false, true },
-                { "military",0, THEME_MILITARY, false, true },
-                { "tcas",   0, THEME_TCAS, false, false },   // clean scope: the symbology is the point
-                { "list",   1, THEME_PHOSPHOR, false, true },
-                { "stats",  2, THEME_PHOSPHOR, false, true },
-                { "weather",3, THEME_PHOSPHOR, false, true },
-                { "forecast",3, THEME_PHOSPHOR, true, true },
+            struct Shot { const char *name; int view; int theme; bool forecast; bool card; int gps; };
+            const Shot shots[10] = {
+                { "radar",  0, THEME_PHOSPHOR, false, true, 0 },
+                { "orb", 0, THEME_ORB, false, true, 0 },
+                { "amber",  0, THEME_AMBER, false, true, 0 },
+                { "military",0, THEME_MILITARY, false, true, 0 },
+                // TCAS shots mirror the proposal's examples: GPS fix + heading-up 250, and GPS LOST
+                { "tcas",     0, THEME_TCAS, false, false, 2 },
+                { "tcaslost", 0, THEME_TCAS, false, false, 1 },
+                { "list",   1, THEME_PHOSPHOR, false, true, 0 },
+                { "stats",  2, THEME_PHOSPHOR, false, true, 0 },
+                { "weather",3, THEME_PHOSPHOR, false, true, 0 },
+                { "forecast",3, THEME_PHOSPHOR, true, true, 0 },
             };
-            for (int v = 0; v < 9; ++v) {
+            for (int v = 0; v < 10; ++v) {
                 radar::setTheme(shots[v].theme);
                 radar::select(shots[v].card ? 0 : -1);
+                radar::setGpsStatus(shots[v].gps, 16, 360.0f);
+                g_set.rotationDeg = (shots[v].gps == 2) ? 250.0 : 0.0;
+                radar::update(g_mockAcs, g_set);
                 ui_on_data_updated();
                 ui_set_weather_forecast(shots[v].forecast);
                 ui_show_view(shots[v].view);

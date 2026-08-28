@@ -136,7 +136,11 @@ static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb()  { return s_theme == THEME_ORB; }
 static inline bool tcas() { return s_theme == THEME_TCAS; }
-static float s_curRangeKm = RANGE_KM_DEFAULT;   // latest display range (for the TCAS ring labels)
+static float  s_curRangeKm = RANGE_KM_DEFAULT;  // latest display range (for the TCAS ring labels)
+static double s_rotDeg     = 0.0;               // scope rotation (heading-up); bezel follows it
+static int    s_gpsState   = 0;                 // TCAS readouts: 0 = GPS off, 1 = lost, 2 = fix
+static int    s_gpsSats    = 0;
+static float  s_gpsAltM    = NAN;
 
 static void show(lv_obj_t *o, bool v) {
     if (!o) return;
@@ -204,12 +208,16 @@ static void grid_draw_cb(lv_event_t *e) {
     const lv_point_t c = { s_cx, s_cy };
 
     if (tcas()) {
-        // TCAS-style scope (design by @pikachu.jp): numeric compass bezel, dotted
-        // range rings with NM labels, own-ship symbol at the centre. No sweep, no flow.
-        coastline_draw(d, COAST_COLOR, 110, 2);            // faint map context
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 120);
-
+        // TCAS-style scope (design by @pikachu.jp): numeric compass bezel, dotted range
+        // rings with NM labels, own-ship at the centre, GPS readouts, heading-up support.
+        // Deliberately no map / sweep / flow — the reference displays are plain black.
         const float R = (float)RADAR_R_OUTER_PX;
+        const float rot = (float)s_rotDeg;                 // heading-up: bezel rotates with it
+        const bool  gpsLost = (s_gpsState == 1);
+        const lv_color_t cOk   = lv_color_hex(0x2ECC71);   // status green (proposal)
+        const lv_color_t cBad  = lv_color_hex(0xFF3B30);   // status red
+        const lv_color_t cStat = gpsLost ? cBad : cOk;
+
         lv_draw_line_dsc_t tk;
         lv_draw_line_dsc_init(&tk);
         tk.color = TCAS_CHROME;
@@ -217,8 +225,8 @@ static void grid_draw_cb(lv_event_t *e) {
             const bool major = (deg % 30) == 0;
             tk.width = major ? 2 : 1;
             tk.opa   = major ? 210 : 130;
-            lv_point_t p1 = rim_point((float)deg, R);
-            lv_point_t p2 = rim_point((float)deg, R - (major ? 12.0f : 7.0f));
+            lv_point_t p1 = rim_point((float)deg - rot, R);
+            lv_point_t p2 = rim_point((float)deg - rot, R - (major ? 12.0f : 7.0f));
             lv_draw_line(d, &tk, &p1, &p2);
         }
         lv_draw_label_dsc_t hd;                            // heading numbers (deg/10, every 30°)
@@ -229,32 +237,130 @@ static void grid_draw_cb(lv_event_t *e) {
         for (int deg = 0; deg < 360; deg += 30) {
             char n[4];
             snprintf(n, sizeof(n), "%d", deg / 10);
-            const lv_point_t p = rim_point((float)deg, R - 24.0f);
+            const lv_point_t p = rim_point((float)deg - rot, R - 24.0f);
             lv_area_t a = { (lv_coord_t)(p.x - 14), (lv_coord_t)(p.y - 8),
                             (lv_coord_t)(p.x + 14), (lv_coord_t)(p.y + 8) };
             lv_draw_label(d, &hd, &a, n, NULL);
         }
+        {                                                  // white bezel arrows (intercardinals)
+            lv_draw_rect_dsc_t wt;
+            lv_draw_rect_dsc_init(&wt);
+            wt.bg_color = TCAS_INK; wt.bg_opa = 230;
+            for (int deg = 45; deg < 360; deg += 90) {
+                const float a = (float)deg - rot;
+                lv_point_t tip  = rim_point(a, R - 18.0f);            // pointing inward
+                lv_point_t b1   = rim_point(a - 2.4f, R - 6.0f);
+                lv_point_t b2   = rim_point(a + 2.4f, R - 6.0f);
+                lv_point_t tri[3] = { tip, b1, b2 };
+                lv_draw_polygon(d, &wt, tri, 3);
+            }
+        }
 
-        lv_draw_arc_dsc_t rg;                              // dotted range rings at 1/4, 1/2, 3/4
-        lv_draw_arc_dsc_init(&rg);
-        rg.color = TCAS_CHROME;
-        rg.width = 1;
-        rg.opa   = 150;
-        lv_draw_label_dsc_t rl;                            // ...each labelled in NM
-        lv_draw_label_dsc_init(&rl);
-        rl.font  = &lv_font_montserrat_12;
-        rl.color = TCAS_CHROME;
-        for (int k = 1; k <= 3; ++k) {
-            const float frac = (float)k / 4.0f;
-            const lv_coord_t rr = (lv_coord_t)lroundf(R * frac);
-            for (int a0 = 0; a0 < 360; a0 += 10)
-                lv_draw_arc(d, &rg, &c, rr, (float)a0, (float)a0 + 4.0f);
-            char nm[12];
-            snprintf(nm, sizeof(nm), "%.0f", (double)(s_curRangeKm * frac * 0.539957f));
-            const lv_point_t lp = rim_point(315.0f, (float)rr);   // label on the NW diagonal
-            lv_area_t la = { (lv_coord_t)(lp.x - 12), (lv_coord_t)(lp.y - 14),
-                             (lv_coord_t)(lp.x + 20), (lv_coord_t)(lp.y + 2) };
-            lv_draw_label(d, &rl, &la, nm, NULL);
+        if (!gpsLost) {                                    // rings + traffic hide on GPS LOST
+            lv_draw_arc_dsc_t rg;                          // dotted range rings at 1/4, 1/2, 3/4
+            lv_draw_arc_dsc_init(&rg);
+            rg.color = TCAS_CHROME;
+            rg.width = 1;
+            rg.opa   = 150;
+            lv_draw_label_dsc_t rl;                        // ...each labelled in NM
+            lv_draw_label_dsc_init(&rl);
+            rl.font  = &lv_font_montserrat_12;
+            rl.color = TCAS_CHROME;
+            for (int k = 1; k <= 3; ++k) {
+                const float frac = (float)k / 4.0f;
+                const lv_coord_t rr = (lv_coord_t)lroundf(R * frac);
+                for (int a0 = 0; a0 < 360; a0 += 10)
+                    lv_draw_arc(d, &rg, &c, rr, (float)a0, (float)a0 + 4.0f);
+                char nm[12];
+                snprintf(nm, sizeof(nm), "%.0f", (double)(s_curRangeKm * frac * 0.539957f));
+                const lv_point_t lp = rim_point(315.0f, (float)rr);   // label on the NW diagonal
+                lv_area_t la = { (lv_coord_t)(lp.x - 12), (lv_coord_t)(lp.y - 14),
+                                 (lv_coord_t)(lp.x + 20), (lv_coord_t)(lp.y + 2) };
+                lv_draw_label(d, &rl, &la, nm, NULL);
+            }
+        }
+
+        if (rot != 0.0f && !gpsLost) {                     // own-course line straight up (heading-up)
+            lv_draw_line_dsc_t hl;
+            lv_draw_line_dsc_init(&hl);
+            hl.color = lv_color_hex(0x8E7CFF);             // violet, as in the proposal
+            hl.width = 2;
+            hl.opa = 190;
+            lv_point_t a1 = { s_cx, s_cy };
+            lv_point_t a2 = { s_cx, (lv_coord_t)(s_cy - (lv_coord_t)lroundf(R * 0.55f)) };
+            lv_draw_line(d, &hl, &a1, &a2);
+        }
+
+        {                                                  // lubber pointer + boxed heading readout
+            lv_draw_rect_dsc_t lp;
+            lv_draw_rect_dsc_init(&lp);
+            lp.bg_color = lv_color_hex(0xB9E14A);          // yellow-green pointer (proposal)
+            lp.bg_opa = 255;
+            lv_point_t tri[3] = { { s_cx, (lv_coord_t)(s_cy - R + 22) },
+                                  { (lv_coord_t)(s_cx - 7), (lv_coord_t)(s_cy - R + 8) },
+                                  { (lv_coord_t)(s_cx + 7), (lv_coord_t)(s_cy - R + 8) } };
+            lv_draw_polygon(d, &lp, tri, 3);
+
+            lv_draw_rect_dsc_t bx;                         // white-bordered heading box
+            lv_draw_rect_dsc_init(&bx);
+            bx.bg_color = lv_color_black(); bx.bg_opa = LV_OPA_COVER;
+            bx.border_color = TCAS_INK; bx.border_width = 2; bx.border_opa = 255;
+            lv_area_t ba = { (lv_coord_t)(s_cx - 26), (lv_coord_t)(s_cy - R + 84),
+                             (lv_coord_t)(s_cx + 26), (lv_coord_t)(s_cy - R + 110) };
+            lv_draw_rect(d, &bx, &ba);
+            lv_draw_label_dsc_t bt;
+            lv_draw_label_dsc_init(&bt);
+            bt.font = &lv_font_montserrat_14;
+            bt.color = TCAS_INK;
+            bt.align = LV_TEXT_ALIGN_CENTER;
+            char hb[8];
+            snprintf(hb, sizeof(hb), "%d", ((int)lroundf(rot) % 360 + 360) % 360);
+            lv_area_t bl = { ba.x1, (lv_coord_t)(ba.y1 + 5), ba.x2, ba.y2 };
+            lv_draw_label(d, &bt, &bl, hb, NULL);
+        }
+
+        if (s_gpsState > 0) {                              // GPS readouts (ALT / GPS LEV) top-left
+            lv_draw_label_dsc_t gt;
+            lv_draw_label_dsc_init(&gt);
+            gt.font = &lv_font_montserrat_12;
+            gt.color = cStat;
+            char l1[28], l2[20];
+            if (!gpsLost && s_gpsAltM == s_gpsAltM)
+                snprintf(l1, sizeof(l1), "ALT %.0fft (%.0fm)", (double)(s_gpsAltM * 3.28084f), (double)s_gpsAltM);
+            else
+                snprintf(l1, sizeof(l1), "ALT --");
+            snprintf(l2, sizeof(l2), "GPS LEV %d", s_gpsSats);
+            lv_area_t a1 = { (lv_coord_t)(s_cx - 178), (lv_coord_t)(s_cy - 122),
+                             (lv_coord_t)(s_cx - 30),  (lv_coord_t)(s_cy - 106) };
+            lv_area_t a2 = { a1.x1, (lv_coord_t)(a1.y1 + 18), a1.x2, (lv_coord_t)(a1.y2 + 18) };
+            lv_draw_label(d, &gt, &a1, l1, NULL);
+            lv_draw_label(d, &gt, &a2, l2, NULL);
+
+            lv_draw_rect_dsc_t sb;                         // GPS FIXED / GPS LOST status box
+            lv_draw_rect_dsc_init(&sb);
+            sb.bg_color = lv_color_black(); sb.bg_opa = LV_OPA_COVER;
+            sb.border_color = cStat; sb.border_width = 2; sb.border_opa = 255;
+            lv_area_t ba = { (lv_coord_t)(s_cx - 58), (lv_coord_t)(s_cy + R - 108),
+                             (lv_coord_t)(s_cx + 58), (lv_coord_t)(s_cy + R - 82) };
+            lv_draw_rect(d, &sb, &ba);
+            lv_draw_label_dsc_t st;
+            lv_draw_label_dsc_init(&st);
+            st.font = &lv_font_montserrat_14;
+            st.color = cStat;
+            st.align = LV_TEXT_ALIGN_CENTER;
+            lv_area_t sa = { ba.x1, (lv_coord_t)(ba.y1 + 5), ba.x2, ba.y2 };
+            lv_draw_label(d, &st, &sa, gpsLost ? "GPS LOST" : "GPS FIXED", NULL);
+        }
+
+        if (gpsLost) {                                     // red X across the scope (traffic hidden)
+            lv_draw_line_dsc_t xd;
+            lv_draw_line_dsc_init(&xd);
+            xd.color = cBad; xd.width = 5; xd.opa = 230;
+            xd.round_start = 1; xd.round_end = 1;
+            lv_point_t x1a = rim_point(315.0f, R * 0.86f), x1b = rim_point(135.0f, R * 0.86f);
+            lv_point_t x2a = rim_point(45.0f,  R * 0.86f), x2b = rim_point(225.0f, R * 0.86f);
+            lv_draw_line(d, &xd, &x1a, &x1b);
+            lv_draw_line(d, &xd, &x2a, &x2b);
         }
 
         lv_draw_line_dsc_t os;                             // own-ship: simple white aircraft
@@ -545,6 +651,7 @@ static void ac_draw_cb(lv_event_t *e) {
             }
         } else if (tcas()) {
             if (!ac.inRange) continue;
+            if (s_gpsState == 1) continue;   // GPS LOST: position is stale — traffic hidden (red X shows)
             // TCAS symbology (proposal by @pikachu.jp): shape + colour by altitude band.
             // Hollow diamond >= 20000 ft, filled diamond 8000-19999, circle 3000-7999,
             // square < 3000, grey square on ground. Trend arrow when climbing/descending.
@@ -788,6 +895,16 @@ void setLargeText(bool on) {
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
 
+void setGpsStatus(int state, int sats, float altM) {
+    const bool altSame = (altM == s_gpsAltM) || (altM != altM && s_gpsAltM != s_gpsAltM);
+    if (state == s_gpsState && sats == s_gpsSats && altSame) return;
+    s_gpsState = state; s_gpsSats = sats; s_gpsAltM = altM;
+    if (tcas()) {                       // readouts live in the chrome + traffic layer
+        if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
+        if (s_acLayer)   lv_obj_invalidate(s_acLayer);
+    }
+}
+
 void init(void *lv_parent) {
     lv_obj_t *parent = (lv_obj_t *)lv_parent;
     s_parent = parent;
@@ -871,6 +988,10 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     std::set<std::string> present;
     const float R = (float)RADAR_R_OUTER_PX;
     s_curRangeKm = s.rangeKm;                     // TCAS ring labels read this (grid repaints below on change)
+    if (fabs(s.rotationDeg - s_rotDeg) > 0.5) {   // heading-up turned: the bezel must repaint
+        s_rotDeg = s.rotationDeg;
+        if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
+    }
     ++s_flowGen;                                  // one tick per poll; flow segments age in these units
 
     // Reproject the coastline only when the scope geometry actually changes (home

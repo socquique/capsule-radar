@@ -14,3 +14,5 @@ bool gps_has_fix();                          // a recent, valid position fix
 bool gps_location(double *lat, double *lon); // last fix (false if none)
 int  gps_satellites();                       // satellites in use/view (0 if none/unknown)
 float gps_altitude_m();                      // GPS altitude in metres (NAN if unknown)
+float gps_course_deg();                      // course over ground, degrees true (NAN if unknown)
+float gps_speed_kmh();                       // ground speed in km/h (NAN if unknown)

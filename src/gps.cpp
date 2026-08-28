@@ -133,3 +133,13 @@ int gps_satellites() {
 float gps_altitude_m() {
     return s_gps.altitude.isValid() ? (float)s_gps.altitude.meters() : NAN;
 }
+
+float gps_course_deg() {
+    return (s_gps.course.isValid() && s_gps.course.age() < GPS_FIX_TTL_MS)
+               ? (float)s_gps.course.deg() : NAN;
+}
+
+float gps_speed_kmh() {
+    return (s_gps.speed.isValid() && s_gps.speed.age() < GPS_FIX_TTL_MS)
+               ? (float)s_gps.speed.kmph() : NAN;
+}
