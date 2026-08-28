@@ -38,6 +38,14 @@
 #define COAST_COLOR lv_color_hex(0x4E86C6)
 // airport markers — a neutral muted grey-blue so they sit quietly under the traffic.
 #define AIRPORT_COLOR lv_color_hex(0x8A93A6)
+// ---- tcas palette (TCAS-style traffic display; community design by @pikachu.jp) ----
+// Altitude bands follow the proposal: cyan = high, amber = mid, red = low, grey = ground.
+#define TCAS_CYAN    lv_color_hex(0x3CE0FF)
+#define TCAS_AMBER   lv_color_hex(0xFFB23C)
+#define TCAS_RED     lv_color_hex(0xFF4D4D)
+#define TCAS_GREY    lv_color_hex(0x9AA3B2)
+#define TCAS_CHROME  lv_color_hex(0x6E7683)   // bezel ticks / rings (quiet grey)
+#define TCAS_INK     lv_color_hex(0xF2F5FA)   // headings / own-ship (near white)
 // ---- orb palette (Orb) ----
 #define ORB_BLIP   lv_color_hex(0xFFE11A)
 #define ORB_EMERG  lv_color_hex(0xFF4D2E)
@@ -126,12 +134,23 @@ static std::map<std::string, std::vector<lv_point_t>> s_trails;
 static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
-static inline bool orb() { return s_theme == THEME_ORB; }
+static inline bool orb()  { return s_theme == THEME_ORB; }
+static inline bool tcas() { return s_theme == THEME_TCAS; }
+static float s_curRangeKm = RANGE_KM_DEFAULT;   // latest display range (for the TCAS ring labels)
 
 static void show(lv_obj_t *o, bool v) {
     if (!o) return;
     if (v) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
     else   lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+// TCAS altitude bands (proposal): grey = ground, red < 3000 ft, amber 3000-7999 ft,
+// cyan >= 8000 ft (hollow vs filled split at 20000 ft happens at draw time).
+static lv_color_t tcas_color(float altFt, bool onGround) {
+    if (onGround)     return TCAS_GREY;
+    if (altFt < 3000) return TCAS_RED;
+    if (altFt < 8000) return TCAS_AMBER;
+    return TCAS_CYAN;
 }
 
 static lv_color_t alt_color(float altFt, bool onGround) {
@@ -163,7 +182,7 @@ static inline lv_point_t rot_pt(float px, float py, float deg, lv_coord_t ox, lv
 
 // =============================== flow map ====================================
 static void flow_draw_seg(const FlowSeg &s) {
-    if (!s_flowCanvas) return;
+    if (!s_flowCanvas || tcas()) return;   // TCAS keeps a clean scope: no flow tracks
     lv_draw_line_dsc_t d;
     lv_draw_line_dsc_init(&d);
     d.color = orb() ? ORB_FLOW : s_cRing;
@@ -183,6 +202,77 @@ static void flow_redraw_all(void) {
 static void grid_draw_cb(lv_event_t *e) {
     lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
     const lv_point_t c = { s_cx, s_cy };
+
+    if (tcas()) {
+        // TCAS-style scope (design by @pikachu.jp): numeric compass bezel, dotted
+        // range rings with NM labels, own-ship symbol at the centre. No sweep, no flow.
+        coastline_draw(d, COAST_COLOR, 110, 2);            // faint map context
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 120);
+
+        const float R = (float)RADAR_R_OUTER_PX;
+        lv_draw_line_dsc_t tk;
+        lv_draw_line_dsc_init(&tk);
+        tk.color = TCAS_CHROME;
+        for (int deg = 0; deg < 360; deg += 10) {          // bezel ticks: minor 10°, major 30°
+            const bool major = (deg % 30) == 0;
+            tk.width = major ? 2 : 1;
+            tk.opa   = major ? 210 : 130;
+            lv_point_t p1 = rim_point((float)deg, R);
+            lv_point_t p2 = rim_point((float)deg, R - (major ? 12.0f : 7.0f));
+            lv_draw_line(d, &tk, &p1, &p2);
+        }
+        lv_draw_label_dsc_t hd;                            // heading numbers (deg/10, every 30°)
+        lv_draw_label_dsc_init(&hd);
+        hd.font  = &lv_font_montserrat_12;
+        hd.color = TCAS_INK;
+        hd.align = LV_TEXT_ALIGN_CENTER;
+        for (int deg = 0; deg < 360; deg += 30) {
+            char n[4];
+            snprintf(n, sizeof(n), "%d", deg / 10);
+            const lv_point_t p = rim_point((float)deg, R - 24.0f);
+            lv_area_t a = { (lv_coord_t)(p.x - 14), (lv_coord_t)(p.y - 8),
+                            (lv_coord_t)(p.x + 14), (lv_coord_t)(p.y + 8) };
+            lv_draw_label(d, &hd, &a, n, NULL);
+        }
+
+        lv_draw_arc_dsc_t rg;                              // dotted range rings at 1/4, 1/2, 3/4
+        lv_draw_arc_dsc_init(&rg);
+        rg.color = TCAS_CHROME;
+        rg.width = 1;
+        rg.opa   = 150;
+        lv_draw_label_dsc_t rl;                            // ...each labelled in NM
+        lv_draw_label_dsc_init(&rl);
+        rl.font  = &lv_font_montserrat_12;
+        rl.color = TCAS_CHROME;
+        for (int k = 1; k <= 3; ++k) {
+            const float frac = (float)k / 4.0f;
+            const lv_coord_t rr = (lv_coord_t)lroundf(R * frac);
+            for (int a0 = 0; a0 < 360; a0 += 10)
+                lv_draw_arc(d, &rg, &c, rr, (float)a0, (float)a0 + 4.0f);
+            char nm[12];
+            snprintf(nm, sizeof(nm), "%.0f", (double)(s_curRangeKm * frac * 0.539957f));
+            const lv_point_t lp = rim_point(315.0f, (float)rr);   // label on the NW diagonal
+            lv_area_t la = { (lv_coord_t)(lp.x - 12), (lv_coord_t)(lp.y - 14),
+                             (lv_coord_t)(lp.x + 20), (lv_coord_t)(lp.y + 2) };
+            lv_draw_label(d, &rl, &la, nm, NULL);
+        }
+
+        lv_draw_line_dsc_t os;                             // own-ship: simple white aircraft
+        lv_draw_line_dsc_init(&os);
+        os.color = TCAS_INK;
+        os.width = 3;
+        os.opa = 255;
+        os.round_start = 1; os.round_end = 1;
+        lv_point_t f1 = { s_cx, (lv_coord_t)(s_cy - 12) }, f2 = { s_cx, (lv_coord_t)(s_cy + 10) };
+        lv_point_t w1 = { (lv_coord_t)(s_cx - 10), (lv_coord_t)(s_cy - 2) },
+                   w2 = { (lv_coord_t)(s_cx + 10), (lv_coord_t)(s_cy - 2) };
+        lv_point_t t1 = { (lv_coord_t)(s_cx - 5),  (lv_coord_t)(s_cy + 9) },
+                   t2 = { (lv_coord_t)(s_cx + 5),  (lv_coord_t)(s_cy + 9) };
+        lv_draw_line(d, &os, &f1, &f2);
+        lv_draw_line(d, &os, &w1, &w2);
+        lv_draw_line(d, &os, &t1, &t2);
+        return;
+    }
 
     if (orb()) {
         lv_draw_line_dsc_t gl;
@@ -243,7 +333,7 @@ static void grid_draw_cb(lv_event_t *e) {
 
 // =============================== sweep =======================================
 static void sweep_draw_cb(lv_event_t *e) {
-    if (orb()) return;
+    if (orb() || tcas()) return;   // TCAS displays have no rotating sweep
     lv_draw_ctx_t *dctx = lv_event_get_draw_ctx(e);
     const lv_point_t center = { s_cx, s_cy };
     const float R = (float)RADAR_R_OUTER_PX;
@@ -293,8 +383,9 @@ static void wedge_bbox(float deg, lv_area_t *out) {
 // Must cover the label areas drawn in the aircraft layer (they grew for large-text mode).
 static inline lv_area_t glyph_bbox(lv_point_t p) {
     lv_area_t a;
-    if (orb()) { a.x1 = p.x - 30; a.y1 = p.y - 30; a.x2 = p.x + 30;  a.y2 = p.y + 30; }
-    else          { a.x1 = p.x - 22; a.y1 = p.y - 22; a.x2 = p.x + 174; a.y2 = p.y + 32; }
+    if (orb())       { a.x1 = p.x - 30; a.y1 = p.y - 30; a.x2 = p.x + 30;  a.y2 = p.y + 30; }
+    else if (tcas()) { a.x1 = p.x - 40; a.y1 = p.y - 24; a.x2 = p.x + 40;  a.y2 = p.y + 46; }  // centred labels below
+    else             { a.x1 = p.x - 22; a.y1 = p.y - 22; a.x2 = p.x + 174; a.y2 = p.y + 32; }
     return a;
 }
 static inline void area_union(lv_area_t &d, const lv_area_t &s) {
@@ -452,6 +543,67 @@ static void ac_draw_cb(lv_event_t *e) {
                 draw_offrange(d, ac);
                 arrows++;
             }
+        } else if (tcas()) {
+            if (!ac.inRange) continue;
+            // TCAS symbology (proposal by @pikachu.jp): shape + colour by altitude band.
+            // Hollow diamond >= 20000 ft, filled diamond 8000-19999, circle 3000-7999,
+            // square < 3000, grey square on ground. Trend arrow when climbing/descending.
+            const lv_color_t col = tcas_color(ac.altFt, ac.onGround);
+            const lv_coord_t r = 9;
+            if (!ac.onGround && ac.altFt >= 8000.0f) {
+                lv_point_t dia[4] = { { ac.pos.x, (lv_coord_t)(ac.pos.y - r) },
+                                      { (lv_coord_t)(ac.pos.x + r), ac.pos.y },
+                                      { ac.pos.x, (lv_coord_t)(ac.pos.y + r) },
+                                      { (lv_coord_t)(ac.pos.x - r), ac.pos.y } };
+                if (ac.altFt >= 20000.0f) {                      // hollow diamond
+                    lv_draw_line_dsc_t dl;
+                    lv_draw_line_dsc_init(&dl);
+                    dl.color = col; dl.width = 2; dl.opa = 255;
+                    for (int i = 0; i < 4; ++i) lv_draw_line(d, &dl, &dia[i], &dia[(i + 1) & 3]);
+                } else {                                          // filled diamond
+                    lv_draw_rect_dsc_t g;
+                    lv_draw_rect_dsc_init(&g);
+                    g.bg_color = col; g.bg_opa = LV_OPA_COVER;
+                    lv_draw_polygon(d, &g, dia, 4);
+                }
+            } else {
+                lv_draw_rect_dsc_t g;                             // circle (mid) / square (low, ground)
+                lv_draw_rect_dsc_init(&g);
+                g.bg_color = col; g.bg_opa = LV_OPA_COVER;
+                const bool circle = !ac.onGround && ac.altFt >= 3000.0f;
+                g.radius = circle ? LV_RADIUS_CIRCLE : 0;
+                const lv_coord_t hr = circle ? r : (lv_coord_t)(r - 2);
+                lv_area_t a = { (lv_coord_t)(ac.pos.x - hr), (lv_coord_t)(ac.pos.y - hr),
+                                (lv_coord_t)(ac.pos.x + hr), (lv_coord_t)(ac.pos.y + hr) };
+                lv_draw_rect(d, &g, &a);
+            }
+            if (ac.vsFpm == ac.vsFpm && fabsf(ac.vsFpm) >= 500.0f) {   // climb/descent trend arrow
+                lv_draw_label_dsc_t vd;
+                lv_draw_label_dsc_init(&vd);
+                vd.font = &lv_font_montserrat_14;
+                vd.color = col;
+                lv_area_t va = { (lv_coord_t)(ac.pos.x + r + 3), (lv_coord_t)(ac.pos.y - 9),
+                                 (lv_coord_t)(ac.pos.x + r + 21), (lv_coord_t)(ac.pos.y + 9) };
+                lv_draw_label(d, &vd, &va, ac.vsFpm > 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, NULL);
+            }
+            {                                                     // callsign + altitude below, centred
+                lv_draw_label_dsc_t lc;
+                lv_draw_label_dsc_init(&lc);
+                lc.font = s_bigText ? &lv_font_montserrat_16 : &lv_font_montserrat_12;
+                lc.color = col;
+                lc.align = LV_TEXT_ALIGN_CENTER;
+                lv_area_t a1 = { (lv_coord_t)(ac.pos.x - 38), (lv_coord_t)(ac.pos.y + r + 2),
+                                 (lv_coord_t)(ac.pos.x + 38), (lv_coord_t)(ac.pos.y + r + 18) };
+                if (ac.call[0]) lv_draw_label(d, &lc, &a1, ac.call, NULL);
+                lv_area_t a2 = { a1.x1, (lv_coord_t)(a1.y1 + 15), a1.x2, (lv_coord_t)(a1.y2 + 15) };
+                if (ac.altTxt[0]) lv_draw_label(d, &lc, &a2, ac.altTxt, NULL);
+            }
+            if (ac.emergency) {
+                lv_draw_arc_dsc_t h;
+                lv_draw_arc_dsc_init(&h);
+                h.color = TCAS_RED; h.width = 2; h.opa = 220;
+                lv_draw_arc(d, &h, &ac.pos, 16, 0, 360);
+            }
         } else {
             if (!ac.inRange) continue;            // phosphor shows in-range traffic only
             draw_trail(d, ac, ac.color);
@@ -493,8 +645,8 @@ static void ac_draw_cb(lv_event_t *e) {
             }
         }
 
-        // floating labels (phosphor only; orb keeps clean balls + the tap card)
-        if (!drg) {
+        // floating labels (phosphor only; orb keeps clean balls, TCAS draws its own below the icon)
+        if (!drg && !tcas()) {
             lv_draw_label_dsc_t lc;
             lv_draw_label_dsc_init(&lc);
             lc.font = s_bigText ? &lv_font_montserrat_18 : &lv_font_montserrat_14;
@@ -554,6 +706,9 @@ void setTheme(int t) {
         case THEME_MILITARY:
             s_cRing = lv_color_hex(0x49C46B); s_cLead = lv_color_hex(0x76E08C);
             s_cInk  = lv_color_hex(0xE0FFE6); s_cSoft = lv_color_hex(0x9FD7A8); break;
+        case THEME_TCAS:
+            s_cRing = TCAS_CHROME; s_cLead = TCAS_INK;
+            s_cInk  = TCAS_INK;    s_cSoft = lv_color_hex(0xB9C2CF); break;
         default:                                // phosphor (orb uses its own colors)
             s_cRing = COL_GREEN; s_cLead = COL_LEAD; s_cInk = COL_INK; s_cSoft = COL_SOFT; break;
     }
@@ -569,10 +724,12 @@ void setTheme(int t) {
         }
         lv_obj_set_style_bg_opa(s_parent, LV_OPA_COVER, 0);
     }
-    for (int i = 0; i < 4; ++i) show(s_rose[i], !drg);   // hide compass in Orb
+    // Orb hides the whole compass chrome; TCAS draws its own numeric bezel + own-ship
+    // symbol in grid_draw_cb, so the letter rose / centre dot / pulse hide there too.
+    for (int i = 0; i < 4; ++i) show(s_rose[i], !drg && !tcas());
     show(s_rangeLbl, !drg && s_rangeLblVisible);
-    show(s_centerDot, !drg);                             // orb draws an orange triangle instead
-    show(s_pulse, !drg);
+    show(s_centerDot, !drg && !tcas());
+    show(s_pulse, !drg && !tcas());
 
     // retint the persistent chrome objects for the active palette
     if (s_rose[0]) lv_obj_set_style_text_color(s_rose[0], s_cInk, 0);
@@ -713,6 +870,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     out.reserve(aircraft.size());
     std::set<std::string> present;
     const float R = (float)RADAR_R_OUTER_PX;
+    s_curRangeKm = s.rangeKm;                     // TCAS ring labels read this (grid repaints below on change)
     ++s_flowGen;                                  // one tick per poll; flow segments age in these units
 
     // Reproject the coastline only when the scope geometry actually changes (home

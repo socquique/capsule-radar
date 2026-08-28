@@ -387,9 +387,9 @@ static void handleRoot() {
                  r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", r * ufac, uname);
         ropts += o;
     }
-    const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military"};
+    const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military", "TCAS"};
     String topts;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < THEME_COUNT; ++i) {
         char o[80];
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == th ? " selected" : "", tnames[i]);
         topts += o;

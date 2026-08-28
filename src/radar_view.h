@@ -17,7 +17,8 @@ enum RadarTheme {
     THEME_ORB   = 1,   // Orb scope: green gradient, grid, yellow blips
     THEME_AMBER    = 2,   // amber CRT scope (warm monochrome chrome)
     THEME_MILITARY = 3,   // night-vision / military green scope
-    THEME_COUNT    = 4
+    THEME_TCAS     = 4,   // TCAS-style traffic display (community design by @pikachu.jp)
+    THEME_COUNT    = 5
 };
 
 // Flattened, display-ready info for one aircraft (detail card / list view).

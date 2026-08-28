@@ -318,19 +318,22 @@ int main(int argc, char **argv) {
             ui_on_data_updated();                        // pick up the mock route for the card
             int ow, oh;
             SDL_GetRendererOutputSize(s_ren, &ow, &oh);
-            struct Shot { const char *name; int view; int theme; bool forecast; };
-            const Shot shots[8] = {
-                { "radar",  0, THEME_PHOSPHOR, false },
-                { "orb", 0, THEME_ORB, false },
-                { "amber",  0, THEME_AMBER, false },
-                { "military",0, THEME_MILITARY, false },
-                { "list",   1, THEME_PHOSPHOR, false },
-                { "stats",  2, THEME_PHOSPHOR, false },
-                { "weather",3, THEME_PHOSPHOR, false },
-                { "forecast",3, THEME_PHOSPHOR, true },
+            struct Shot { const char *name; int view; int theme; bool forecast; bool card; };
+            const Shot shots[9] = {
+                { "radar",  0, THEME_PHOSPHOR, false, true },
+                { "orb", 0, THEME_ORB, false, true },
+                { "amber",  0, THEME_AMBER, false, true },
+                { "military",0, THEME_MILITARY, false, true },
+                { "tcas",   0, THEME_TCAS, false, false },   // clean scope: the symbology is the point
+                { "list",   1, THEME_PHOSPHOR, false, true },
+                { "stats",  2, THEME_PHOSPHOR, false, true },
+                { "weather",3, THEME_PHOSPHOR, false, true },
+                { "forecast",3, THEME_PHOSPHOR, true, true },
             };
-            for (int v = 0; v < 8; ++v) {
+            for (int v = 0; v < 9; ++v) {
                 radar::setTheme(shots[v].theme);
+                radar::select(shots[v].card ? 0 : -1);
+                ui_on_data_updated();
                 ui_set_weather_forecast(shots[v].forecast);
                 ui_show_view(shots[v].view);
                 lv_refr_now(NULL);                       // force the view into the buffer
