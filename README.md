@@ -108,7 +108,7 @@ docs/                hardware / data-source / architecture notes
 
 ## Community ports & forks
 
-This repo targets the **Waveshare ESP32-S3-Touch-AMOLED-1.75 only** — ports to other boards live as forks, linked here (MIT: fork away, and tell me so I can add yours). Board-agnostic fixes and features are very welcome upstream as pull requests.
+The reference board is the **Waveshare ESP32-S3-Touch-AMOLED-1.75**, but other boards are welcome upstream: a port contributed as a pull request (its own PlatformIO env + display layer) gets built by the CI on every release alongside the 1.75 — the 2.1" port below is on that path. Ports that prefer to stay independent live as forks, linked here (MIT: fork away, and tell me so I can add yours).
 
 - **[Capsule Radar for the Waveshare ESP32-S3-Touch-LCD-2.1](https://github.com/alexzogh/capsule-radar/tree/port/esp32-s3-lcd-21)** by **@alexzogh (STLWarehouse)** — a full port to the 2.1" round LCD (ST7701), plus new features: **double-tap to track an aircraft** (scope re-centres on it), a **clock face on idle**, and the busy-airspace **query-radius fix** now merged back into this firmware. Ships its own binaries per release (files with `lcd21` in the name are the 2.1 builds).
 - **[Capsule Radar for the Waveshare 2.8" (non-touch)](https://github.com/ijord/capsule-radar)** by **@ijord** — port to the 2.8" ST7701 panel, with a smoother sweep compositor and the **PNG heap-corruption fix** that shipped upstream in v1.3.28. Thank you!
