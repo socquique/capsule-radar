@@ -151,7 +151,12 @@ static void play_cue(int cue) {
     int16_t *buf = s_buf;
     const float amp = (s_vol / 100.0f) * 17000.0f;
     digitalWrite(PIN_AUDIO_PA, HIGH);              // enable speaker amp
-    delay(8);                                      // let the amp power up
+    // The NS4150B amp needs FAR more than 8 ms to stabilise after power-off: with the old
+    // delay(8) the short pings ended before the speaker was audible on some units (only the
+    // long self-test tone could be heard, or nothing at all — issue #12). Lesson learned on
+    // the same board in TamaPoke. Pings are rare, so a generous settle beats keeping the amp
+    // always-on (which risks idle hiss and burns battery).
+    delay(150);
     size_t bw;
     if (cue == 2) {                                // self-test: ~2 s continuous tone, PA held
         size_t ns = gen_beep(buf, S_BUF_LEN, 1000.0f, 480, amp);
