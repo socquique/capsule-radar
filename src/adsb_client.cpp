@@ -105,6 +105,10 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
     const int expectedBytes = http.getSize();
     NetworkClient& responseStream = http.getStream();
     ReliableJsonStream jsonStream(responseStream);
+    // Match the HTTP client's budget. Without this the wrapper keeps Arduino Stream's default
+    // 1000 ms, so a TLS stall longer than 1 s mid-body still dropped the poll with
+    // IncompleteInput — proven by tests/adsb_json_stream_test.cpp case 3 (found by @geoffg28).
+    jsonStream.setTimeout(8000);
     DeserializationError err = deserializeJson(doc, jsonStream,
                                                DeserializationOption::Filter(filter));
     if (err) {
