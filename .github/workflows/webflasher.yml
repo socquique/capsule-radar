@@ -43,6 +43,9 @@ jobs:
       - name: Build firmware
         run: pio run -e esp32-s3-amoled-175
 
+      - name: Host tests
+        run: ./tests/run_host_tests.sh
+
       - name: Merge into a single flashable binary
         run: |
           B=.pio/build/esp32-s3-amoled-175
