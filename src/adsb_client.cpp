@@ -99,6 +99,16 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
 
     HTTPClient http;
     http.setReuse(false);
+    // Ask in HTTP/1.0, which has no chunked transfer encoding.
+    //
+    // This matters because we stream-parse straight off http.getStream(), and that is the
+    // RAW socket: Arduino's HTTPClient only de-chunks inside writeToStream()/getString().
+    // Against a chunked server (adsb.fi is one; adsb.lol sends Content-Length) ArduinoJson
+    // therefore saw the hex chunk-size line first, parsed "4000" as a perfectly good JSON
+    // number, and reported success with no "ac" key -- a 200 that silently yielded no
+    // aircraft. HTTP/1.0 makes the body either Content-Length- or close-delimited, both of
+    // which the streaming parser handles. Verified against all three providers.
+    http.useHTTP10(true);
     http.setConnectTimeout(6000);    // fail reasonably fast: a slow host must not block the
     http.setTimeout(8000);           // task (and the user's route/photo lookups) for too long
     if (!http.begin(client, url)) { Serial.printf("[adsb] begin failed (%s)\n", host); return false; }
@@ -194,6 +204,7 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
     }
     http.end();
     _cooldownLogged[slot] = false;      // healthy again: allow a future park to be announced
+    _lastHost = host;                   // so the caller can say who served the data
 
     // Ease the imposed gap back down after a sustained good run, so a one-off busy period
     // upstream does not slow us permanently. Additive decrease against the multiplicative
@@ -208,7 +219,13 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
 
     JsonArrayConst arr = doc["ac"].as<JsonArrayConst>();
     if (arr.isNull()) arr = doc["aircraft"].as<JsonArrayConst>();
-    if (arr.isNull()) return false;
+    if (arr.isNull()) {
+        // Was silent, which made a provider that answers 200 with an unexpected shape
+        // indistinguishable from one that is never tried at all.
+        Serial.printf("[adsb] %s: 200 but no aircraft array (expected=%d read=%u)\n",
+                      host, expectedBytes, (unsigned)jsonStream.bytesRead());
+        return false;
+    }
 
     // Keep the ADSB_MAX_AIRCRAFT *nearest* aircraft (not just the first ones the feed happens to
     // list), so busy areas still show the traffic closest to you. We gate by distance BEFORE

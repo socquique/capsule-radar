@@ -64,6 +64,13 @@ Set the `User-Agent` with `HTTPClient::setUserAgent()`. **`addHeader("User-Agent
 silently ignored** — Arduino keeps that header on an internal "handled by code" list, so the
 request goes out as the default `ESP32HTTPClient` and providers refuse it.
 
+Request with `HTTPClient::useHTTP10(true)`. We stream-parse straight off `http.getStream()`,
+and that is the **raw socket** — Arduino only de-chunks inside `writeToStream()`/`getString()`.
+adsb.fi replies `Transfer-Encoding: chunked` (adsb.lol sends `Content-Length`), so without
+this ArduinoJson reads the hex chunk-size line first, parses `4000` as a valid JSON number,
+and returns success with no `ac` key: a 200 that silently yields no aircraft. HTTP/1.0 has no
+chunked encoding, so the body is Content-Length- or close-delimited and streams correctly.
+
 ### Not used: OpenSky
 Now requires OAuth2 client-credentials and has tighter anonymous limits — awkward for an always-on embedded device. Keep as a documented alternative only.
 

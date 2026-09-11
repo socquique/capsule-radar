@@ -27,6 +27,9 @@ public:
     // not an outage, and the caller must not treat it as a failed fetch.
     bool lastPollSkipped() const { return _lastPollSkipped; }
 
+    // Which provider served the most recent successful fetch.
+    const char* lastHost() const { return _lastHost ? _lastHost : "?"; }
+
 private:
     // `slot` indexes both the provider table in adsb_client.cpp and the pacing state below.
     bool fetchFrom(int slot, std::vector<Aircraft>& out);
@@ -66,4 +69,5 @@ private:
     bool   _milOnly = false;
     uint32_t _lastOkMs = 0;
     bool     _lastPollSkipped = false;
+    const char* _lastHost = nullptr;
 };
