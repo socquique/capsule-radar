@@ -940,7 +940,7 @@ static void handleUpdateUpload() {
 void setup() {
     Serial.begin(115200);
     delay(200);
-    Serial.println("\nCapsule Radar boot");
+    Serial.println("\nCapsule Radar boot  fw " FW_VERSION "  board " BOARD_NAME);
 
     if (PIN_LCD_SCLK < 0 || PIN_I2C_SDA < 0) {
         Serial.println("[!] Pins in config.h are still -1. Copy them from the Waveshare demo.");
@@ -1127,7 +1127,7 @@ void loop() {
         ArduinoOTA.begin();
         MDNS.addService("http", "tcp", 80);            // advertise the config web page
         otaUp = true;
-        Serial.println("[ota] ready: pio run -e esp32-s3-amoled-175-ota -t upload");
+        Serial.println("[ota] ready: pio run -e " BOARD_PIO_ENV "-ota -t upload");
     }
     if (otaUp) ArduinoOTA.handle();
 

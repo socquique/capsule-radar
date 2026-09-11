@@ -7,7 +7,13 @@
 // that table is board-specific, the rest is independent.
 #include "audio.h"
 #include "config.h"
+
 #include <Arduino.h>
+
+// Boards without an ES8311 (e.g. the 1.43) compile to no-ops. This is not just
+// dead weight: that board reuses GPIO 9/10 -- the 1.75's I2S BCLK/DIN -- as the
+// panel's QSPI CS and SCLK, so configuring I2S here would break the display.
+#if BOARD_HAS_AUDIO
 #include <Wire.h>
 #include "driver/i2s.h"
 #include "esp_heap_caps.h"
@@ -231,3 +237,14 @@ void audio_selftest() {   // ~2 s continuous tone, ignores mute, PA held on
     s_cue = 2;
     if (s_sem) xSemaphoreGive(s_sem);
 }
+
+#else   // !BOARD_HAS_AUDIO
+
+bool audio_begin()              { Serial.println("[audio] no codec on this board"); return false; }
+bool audio_present()            { return false; }
+void audio_set_volume(int)      {}
+void audio_set_muted(bool)      {}
+void audio_play(AudioCue)       {}
+void audio_selftest()           {}
+
+#endif  // BOARD_HAS_AUDIO
