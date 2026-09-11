@@ -4,6 +4,7 @@
 #include <vector>
 #include <Arduino.h>
 #include "aircraft.h"
+#include "config.h"
 
 class AdsbClient {
 public:
@@ -27,8 +28,8 @@ public:
     bool lastPollSkipped() const { return _lastPollSkipped; }
 
 private:
-    // `slot` indexes the per-provider cooldown below: 0 = primary, 1 = fallback.
-    bool fetchFrom(const char* host, int slot, std::vector<Aircraft>& out);
+    // `slot` indexes both the provider table in adsb_client.cpp and the pacing state below.
+    bool fetchFrom(int slot, std::vector<Aircraft>& out);
 
     // Per-provider pacing. Two separate mechanisms, because the two failures differ:
     //
@@ -44,11 +45,11 @@ private:
     //          a dead stop. An explicit Retry-After still wins and parks us for that long.
     //
     // All time comparisons are millis()-rollover-safe via signed subtraction.
-    uint32_t _cooldownUntil[2]  = {0, 0};
-    uint32_t _spacingMs[2]      = {0, 0};
-    uint32_t _lastAttemptMs[2]  = {0, 0};
-    uint16_t _okStreak[2]       = {0, 0};
-    bool     _cooldownLogged[2] = {false, false};
+    uint32_t _cooldownUntil[ADSB_PROVIDER_COUNT]  = {0};
+    uint32_t _spacingMs[ADSB_PROVIDER_COUNT]      = {0};
+    uint32_t _lastAttemptMs[ADSB_PROVIDER_COUNT]  = {0};
+    uint16_t _okStreak[ADSB_PROVIDER_COUNT]       = {0};
+    bool     _cooldownLogged[ADSB_PROVIDER_COUNT] = {false};
 
     bool cooling(int slot) const {
         if ((int32_t)(_cooldownUntil[slot] - millis()) > 0) return true;

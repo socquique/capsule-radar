@@ -46,8 +46,16 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch
 
 // ---------- ADS-B API (free, non-commercial) ----------
+// Providers are tried in this order; each is paced independently (see AdsbClient).
+// All three return the same readsb shape (an "ac" array), but NOT the same URL path,
+// so each carries its own template in the provider table in adsb_client.cpp.
 #define ADSB_PRIMARY_HOST   "api.airplanes.live"   // GET /v2/point/{lat}/{lon}/{radius_nm}
-#define ADSB_FALLBACK_HOST  "api.adsb.lol"          // same readsb format
+                                                    //   now requires prior approval by email
+#define ADSB_OPENDATA_HOST  "opendata.adsb.fi"     // GET /api/v3/lat/{lat}/lon/{lon}/dist/{nm}
+                                                    //   documented 1 req/s; personal use only,
+                                                    //   attribution required (see docs/DATA_SOURCE.md)
+#define ADSB_FALLBACK_HOST  "api.adsb.lol"          // same readsb format; limits are dynamic
+#define ADSB_PROVIDER_COUNT 3
 #define ADSB_USER_AGENT     "CapsuleRadar/1.0 (ESP32-S3 hobby; +https://github.com/socquique/capsule-radar)"
 #define ADSB_HTTPS_INSECURE 1               // 1 = setInsecure() (hobby). 0 = use pinned root CA.
 #define ADSB_MAX_AIRCRAFT   60              // hard cap parsed per poll (protect RAM in busy areas)
@@ -58,7 +66,7 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define ADSB_COOLDOWN_403_MS  900000UL      // 15 min park after a policy refusal
 #define ADSB_SPACING_STEP_MS    4000UL      // first extra gap imposed after a 429
 #define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
-#define ADSB_SPACING_EASE_OKS      10       // successes needed before easing the gap back down
+#define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down
 #define ADSB_FEED_STALE_MS     60000UL      // no successful fetch for this long -> HUD warning
 
 // ---------- Debug ----------

@@ -51,23 +51,42 @@ void AdsbClient::begin(double homeLat, double homeLon, float rangeKm) {
     _lat = homeLat; _lon = homeLon; _rangeKm = rangeKm;
 }
 
+// Independent providers, tried in order. Same readsb payload, different URL shapes.
+// Order matters: airplanes.live stays first so an approved key is used when available
+// (it parks itself in seconds if not), then adsb.fi, whose 1 req/s limit is documented
+// and fixed, then adsb.lol, whose limits are dynamic and throttle hardest.
+struct AdsbProvider {
+    const char* host;
+    const char* pathFmt;   // lat, lon, radius-in-nm
+};
+static const AdsbProvider kProviders[ADSB_PROVIDER_COUNT] = {
+    { ADSB_PRIMARY_HOST,  "/v2/point/%.4f/%.4f/%.0f"        },
+    { ADSB_OPENDATA_HOST, "/api/v3/lat/%.4f/lon/%.4f/dist/%.0f" },
+    { ADSB_FALLBACK_HOST, "/v2/point/%.4f/%.4f/%.0f"        },
+};
+
 bool AdsbClient::poll(std::vector<Aircraft>& out) {
     if (WiFi.status() != WL_CONNECTED) return false;
-    // Try each independent provider once. Retrying the primary immediately can violate its
-    // one-request-per-second limit and adds another full timeout to an already slow failure.
-    // A provider in cooldown is skipped entirely: when the primary is hard-failing, that is
-    // what keeps us from doubling the request rate onto the fallback (and tripping its 429).
-    const bool c0 = cooling(0), c1 = cooling(1);
-    _lastPollSkipped = c0 && c1;              // nothing was asked; not a failure
-    if (!c0 && fetchFrom(ADSB_PRIMARY_HOST, 0, out)) return true;
-    if (!c1 && fetchFrom(ADSB_FALLBACK_HOST, 1, out)) return true;
+    // Try each independent provider once, skipping any that is parked or still inside its
+    // spacing window. Retrying a hard-failing provider every poll achieves nothing and just
+    // pushes the surviving ones over their own limits.
+    bool askedSomeone = false;
+    for (int i = 0; i < ADSB_PROVIDER_COUNT; ++i) {
+        if (cooling(i)) continue;
+        askedSomeone = true;
+        if (fetchFrom(i, out)) { _lastPollSkipped = false; return true; }
+    }
+    _lastPollSkipped = !askedSomeone;          // nothing was asked; not a failure
     return false;
 }
 
-bool AdsbClient::fetchFrom(const char* host, int slot, std::vector<Aircraft>& out) {
+bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
+    const char* host = kProviders[slot].host;
     const double nm = _rangeKm * 0.539957;            // km -> nautical miles (API radius unit)
+    char path[96];
+    snprintf(path, sizeof(path), kProviders[slot].pathFmt, _lat, _lon, nm);
     char url[160];
-    snprintf(url, sizeof(url), "https://%s/v2/point/%.4f/%.4f/%.0f", host, _lat, _lon, nm);
+    snprintf(url, sizeof(url), "https://%s%s", host, path);
 
     WiFiClientSecure client;
 #if ADSB_HTTPS_INSECURE
