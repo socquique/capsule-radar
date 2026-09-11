@@ -30,15 +30,26 @@ jobs:
       # other boards carry a suffix (e.g. CapsuleRadar-esp32s3-amoled143.bin).
       - name: Build and merge every board
         run: |
-          BOOT_APP0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' | head -1)"
+          set -euo pipefail
           build() {   # build <pio-env> <filename-suffix>
             local env="$1" sfx="$2" b=".pio/build/$1"
             pio run -e "$env"
+            # Look for boot_app0.bin AFTER the build, not before: on a clean runner
+            # ~/.platformio/packages does not exist until the first `pio run` installs the
+            # toolchain, so hoisting this above the builds silently yields an empty path and
+            # esptool then fails with "No such file or directory: ''".
+            local boot_app0
+            boot_app0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' 2>/dev/null | head -1)"
+            if [ -z "$boot_app0" ]; then
+              echo "::error::boot_app0.bin not found under $HOME/.platformio/packages after building $env"
+              find "$HOME/.platformio/packages" -name '*.bin' 2>/dev/null | head -20
+              return 1
+            fi
             python -m esptool --chip esp32s3 merge_bin -o "CapsuleRadar-esp32s3$sfx.bin" \
               --flash_mode dio --flash_freq 80m --flash_size 16MB \
               0x0     "$b/bootloader.bin" \
               0x8000  "$b/partitions.bin" \
-              0xe000  "$BOOT_APP0" \
+              0xe000  "$boot_app0" \
               0x10000 "$b/firmware.bin"
             cp "$b/firmware.bin" "CapsuleRadar-ota$sfx.bin"   # app-only image for the web OTA page
           }
