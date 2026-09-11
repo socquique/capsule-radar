@@ -182,6 +182,13 @@ static void adsb_task(void*) {
                             xSemaphoreGive(g_ac_mutex);
                         }
                     }
+                } else if (g_adsb.lastPollSkipped()) {
+                    // Every provider is parked or inside its spacing window: we chose not to
+                    // ask. Logging this each tick would bury the real errors, and counting it
+                    // would show an outage warning for our own politeness. Prolonged silence
+                    // still trips the warning, via the time check rather than a fail count.
+                    if ((int32_t)(nowMs - g_adsb.lastOkMs()) > (int32_t)ADSB_FEED_STALE_MS)
+                        g_feedOk = false;
                 } else {
                     Serial.println("[adsb] poll failed");
                     if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning

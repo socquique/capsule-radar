@@ -55,11 +55,16 @@ bool AdsbClient::poll(std::vector<Aircraft>& out) {
     if (WiFi.status() != WL_CONNECTED) return false;
     // Try each independent provider once. Retrying the primary immediately can violate its
     // one-request-per-second limit and adds another full timeout to an already slow failure.
-    if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;
-    return fetchFrom(ADSB_FALLBACK_HOST, out);
+    // A provider in cooldown is skipped entirely: when the primary is hard-failing, that is
+    // what keeps us from doubling the request rate onto the fallback (and tripping its 429).
+    const bool c0 = cooling(0), c1 = cooling(1);
+    _lastPollSkipped = c0 && c1;              // nothing was asked; not a failure
+    if (!c0 && fetchFrom(ADSB_PRIMARY_HOST, 0, out)) return true;
+    if (!c1 && fetchFrom(ADSB_FALLBACK_HOST, 1, out)) return true;
+    return false;
 }
 
-bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
+bool AdsbClient::fetchFrom(const char* host, int slot, std::vector<Aircraft>& out) {
     const double nm = _rangeKm * 0.539957;            // km -> nautical miles (API radius unit)
     char url[160];
     snprintf(url, sizeof(url), "https://%s/v2/point/%.4f/%.4f/%.0f", host, _lat, _lon, nm);
@@ -71,23 +76,73 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
     // client.setCACert(ROOT_CA_PEM);                  // production: pin the root CA
 #endif
 
+    _lastAttemptMs[slot] = millis();
+
     HTTPClient http;
     http.setReuse(false);
     http.setConnectTimeout(6000);    // fail reasonably fast: a slow host must not block the
     http.setTimeout(8000);           // task (and the user's route/photo lookups) for too long
     if (!http.begin(client, url)) { Serial.printf("[adsb] begin failed (%s)\n", host); return false; }
-    http.addHeader("User-Agent", ADSB_USER_AGENT);
+    // MUST be setUserAgent(): addHeader() silently drops User-Agent (it is on
+    // HTTPClient's "handled by code" list), leaving the default "ESP32HTTPClient".
+    http.setUserAgent(ADSB_USER_AGENT);
     http.addHeader("Accept", "application/json");
+    const char* wanted[] = { "Retry-After" };
+    http.collectHeaders(wanted, 1);
 
     const int code = http.GET();
     if (code != 200) {
         char tls[128] = "";
         const int tlsCode = client.lastError(tls, sizeof(tls));
+        // Log a bounded slice of the error body. Providers explain themselves here
+        // ("contact us for access", "rate limited", ...) and throwing it away turns an
+        // actionable message into a bare status code. Bounded + time-capped so a hostile
+        // or hanging response can never stall the poll task.
+        char body[161] = "";
+        if (code > 0) {
+            NetworkClient& es = http.getStream();
+            size_t n = 0;
+            const uint32_t t0 = millis();
+            while (n < sizeof(body) - 1 && (millis() - t0) < 500) {
+                if (!es.available()) {
+                    if (!es.connected()) break;
+                    delay(5);
+                    continue;
+                }
+                const int c = es.read();
+                if (c < 0) break;
+                body[n++] = (c == '\r' || c == '\n') ? ' ' : (char)c;
+            }
+            body[n] = '\0';
+        }
         Serial.printf("[adsb] HTTP %d (%s) tls=%d '%s' heap=%u largest=%u psram=%u\n",
                       code, host, tlsCode, tls,
                       (unsigned)ESP.getFreeHeap(),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                       (unsigned)ESP.getFreePsram());
+        if (body[0]) Serial.printf("[adsb]   body: %s\n", body);
+
+        if (code == 403) {
+            // Policy refusal: park it. Announce once, not on every poll.
+            _cooldownUntil[slot] = millis() + ADSB_COOLDOWN_403_MS;
+            if (!_cooldownLogged[slot]) {
+                Serial.printf("[adsb] %s parked for %us after HTTP 403\n",
+                              host, (unsigned)(ADSB_COOLDOWN_403_MS / 1000));
+                _cooldownLogged[slot] = true;
+            }
+        } else if (code == 429) {
+            _okStreak[slot] = 0;
+            const long ra = http.header("Retry-After").toInt();
+            if (ra > 0) _cooldownUntil[slot] = millis() + (uint32_t)ra * 1000UL;
+            // Back off multiplicatively; the limit is dynamic, so probe for what sticks.
+            uint32_t sp = _spacingMs[slot] ? _spacingMs[slot] * 2 : ADSB_SPACING_STEP_MS;
+            if (sp > ADSB_SPACING_MAX_MS) sp = ADSB_SPACING_MAX_MS;
+            if (sp != _spacingMs[slot]) {
+                _spacingMs[slot] = sp;
+                Serial.printf("[adsb] %s rate-limited; spacing requests %us apart\n",
+                              host, (unsigned)(sp / 1000));
+            }
+        }
         http.end(); return false;
     }
 
@@ -119,6 +174,18 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
         return false;
     }
     http.end();
+    _cooldownLogged[slot] = false;      // healthy again: allow a future park to be announced
+
+    // Ease the imposed gap back down after a sustained good run, so a one-off busy period
+    // upstream does not slow us permanently. Additive decrease against the multiplicative
+    // increase above: quick to back off, cautious to speed up.
+    if (_spacingMs[slot] && ++_okStreak[slot] >= ADSB_SPACING_EASE_OKS) {
+        _okStreak[slot] = 0;
+        _spacingMs[slot] = (_spacingMs[slot] > ADSB_SPACING_STEP_MS)
+                             ? _spacingMs[slot] - ADSB_SPACING_STEP_MS : 0;
+        Serial.printf("[adsb] %s steady; spacing eased to %us\n",
+                      host, (unsigned)(_spacingMs[slot] / 1000));
+    }
 
     JsonArrayConst arr = doc["ac"].as<JsonArrayConst>();
     if (arr.isNull()) arr = doc["aircraft"].as<JsonArrayConst>();
