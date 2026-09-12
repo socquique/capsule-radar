@@ -134,6 +134,12 @@ static void adsb_task(void*) {
         wasConnected = conn;
         // self-heal: a long feed outage while WiFi is up usually means the internal heap
         // fragmented and the TLS handshake can't allocate -> reboot to recover (settings persist).
+        // A provider that answers "403, not for you" is NOT that failure, and neither is a poll
+        // we deliberately paced: the stack is fine either way. Count any completed HTTP exchange
+        // as alive, or a feed that every provider refuses reboots the device every three
+        // minutes — and every boot asks all three of them again.
+        const uint32_t lastHttpMs = g_adsb.lastResponseMs();
+        if (lastHttpMs && (int32_t)(lastHttpMs - lastFeedOk) > 0) lastFeedOk = lastHttpMs;
         if (!conn) lastFeedOk = millis();
         else if (millis() - lastFeedOk > 180000UL) {
             Serial.println("[adsb] feed stuck >180s with WiFi up -> restarting to recover");
@@ -157,7 +163,7 @@ static void adsb_task(void*) {
                 // poll() tries the fallback provider after a primary failure; keep the HUD
                 // healthy through isolated misses and warn only after a sustained outage.
                 if (g_adsb.poll(fresh)) {
-                    Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
+                    Serial.printf("[adsb] fetched %u aircraft from %s\n", (unsigned)fresh.size(), g_adsb.lastHost());
                     failCount = 0;
                     g_feedOk = true;
                     const uint32_t receivedMs = millis();
@@ -182,6 +188,13 @@ static void adsb_task(void*) {
                             xSemaphoreGive(g_ac_mutex);
                         }
                     }
+                } else if (g_adsb.lastPollSkipped()) {
+                    // Every provider is parked or inside its spacing window: we chose not to
+                    // ask. Logging this each tick would bury the real errors, and counting it
+                    // would show an outage warning for our own politeness. Prolonged silence
+                    // still trips the warning, via the time check rather than a fail count.
+                    if ((int32_t)(nowMs - g_adsb.lastOkMs()) > (int32_t)ADSB_FEED_STALE_MS)
+                        g_feedOk = false;
                 } else {
                     Serial.println("[adsb] poll failed");
                     if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
