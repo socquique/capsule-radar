@@ -1,13 +1,15 @@
 // M0 bring-up: CO5300 466x466 AMOLED via Arduino_GFX (QSPI) + LVGL.
-// Pins come from config.h (confirmed against the Waveshare board definition and a
-// working Arduino_GFX port for this exact panel). The panel runs off the always-on
-// DC1 rail, so it lights up without configuring the AXP2101 PMIC.
+// Pins, panel gaps and the touch driver all come from the board header selected in
+// config.h (see src/boards/). On boards with an AXP2101 the panel runs off the
+// always-on DC1 rail, so it lights up without configuring the PMIC first.
+// NOTE: gfx->begin() must stay ahead of touch_begin() — on the 1.43 the touch
+// controller's reset is tied to the panel reset and it is absent from I2C until then.
 // The actual UI is built by ui_boot_create() (shared with the native SDL sim).
 #include "display.h"
 #include "config.h"
 #include "radar_view.h"
 #include "ui.h"
-#include "touch_cst9217.h"
+#include "touch.h"
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -291,7 +293,7 @@ bool begin() {
         s_indev_drv.type = LV_INDEV_TYPE_POINTER;
         s_indev_drv.read_cb = touch_read_cb;
         lv_indev_drv_register(&s_indev_drv);
-        Serial.println("[display] CST9217 touch registered");
+        Serial.println("[display] touch registered (" BOARD_NAME ")");
     }
 
     Serial.printf("[display] PSRAM free: %u KB\n", (unsigned)(ESP.getFreePsram() / 1024));
