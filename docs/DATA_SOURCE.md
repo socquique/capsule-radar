@@ -59,6 +59,21 @@ Providers are tried in order and paced **individually**:
   retrying it every poll only burns requests and pushes the others over their limits.
 - **429** — too fast. An adaptive minimum spacing doubles on each 429 and eases back after a
   run of successes. An explicit `Retry-After` wins.
+- **200 with no aircraft array** — the response parsed but is unusable (a provider changed its
+  payload shape, or the chunked-encoding trap below). Same backoff as a 429: without it such a
+  provider is re-asked every poll forever, which is exactly the loop that hid the adsb.fi
+  chunking bug.
+
+The policy lives in `src/adsb_pacing.h`, separate from the HTTP code so it can be driven on
+the host — `tests/adsb_pacing_test.cpp` exercises parking, backoff, easing, `Retry-After` and
+`millis()` rollover without hardware.
+
+The **self-heal watchdog** in `main.cpp` reboots the device after 180 s without a feed, on the
+assumption that the internal heap has fragmented and TLS can no longer allocate. A refusal is
+not that: a 403 arrives over a working TLS session, and a poll we deliberately paced never
+left the device. Both refresh the watchdog via `AdsbClient::lastResponseMs()` — otherwise a
+feed every provider refuses reboots the device every three minutes, and each boot asks all
+three of them again.
 
 Set the `User-Agent` with `HTTPClient::setUserAgent()`. **`addHeader("User-Agent", ...)` is
 silently ignored** — Arduino keeps that header on an internal "handled by code" list, so the

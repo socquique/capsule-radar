@@ -95,7 +95,7 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
     // client.setCACert(ROOT_CA_PEM);                  // production: pin the root CA
 #endif
 
-    _lastAttemptMs[slot] = millis();
+    _pacer.onAttempt(slot, millis());
 
     HTTPClient http;
     http.setReuse(false);
@@ -120,6 +120,7 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
     http.collectHeaders(wanted, 1);
 
     const int code = http.GET();
+    if (code > 0) _lastResponseMs = millis();   // the server answered: TLS and heap are healthy
     if (code != 200) {
         char tls[128] = "";
         const int tlsCode = client.lastError(tls, sizeof(tls));
@@ -153,24 +154,16 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
 
         if (code == 403) {
             // Policy refusal: park it. Announce once, not on every poll.
-            _cooldownUntil[slot] = millis() + ADSB_COOLDOWN_403_MS;
-            if (!_cooldownLogged[slot]) {
+            if (_pacer.onRefused(slot, millis()))
                 Serial.printf("[adsb] %s parked for %us after HTTP 403\n",
                               host, (unsigned)(ADSB_COOLDOWN_403_MS / 1000));
-                _cooldownLogged[slot] = true;
-            }
         } else if (code == 429) {
-            _okStreak[slot] = 0;
-            const long ra = http.header("Retry-After").toInt();
-            if (ra > 0) _cooldownUntil[slot] = millis() + (uint32_t)ra * 1000UL;
             // Back off multiplicatively; the limit is dynamic, so probe for what sticks.
-            uint32_t sp = _spacingMs[slot] ? _spacingMs[slot] * 2 : ADSB_SPACING_STEP_MS;
-            if (sp > ADSB_SPACING_MAX_MS) sp = ADSB_SPACING_MAX_MS;
-            if (sp != _spacingMs[slot]) {
-                _spacingMs[slot] = sp;
+            const long ra = http.header("Retry-After").toInt();
+            const uint32_t sp = _pacer.onRateLimited(slot, millis(), ra);
+            if (sp)
                 Serial.printf("[adsb] %s rate-limited; spacing requests %us apart\n",
                               host, (unsigned)(sp / 1000));
-            }
         }
         http.end(); return false;
     }
@@ -203,29 +196,29 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
         return false;
     }
     http.end();
-    _cooldownLogged[slot] = false;      // healthy again: allow a future park to be announced
-    _lastHost = host;                   // so the caller can say who served the data
-
-    // Ease the imposed gap back down after a sustained good run, so a one-off busy period
-    // upstream does not slow us permanently. Additive decrease against the multiplicative
-    // increase above: quick to back off, cautious to speed up.
-    if (_spacingMs[slot] && ++_okStreak[slot] >= ADSB_SPACING_EASE_OKS) {
-        _okStreak[slot] = 0;
-        _spacingMs[slot] = (_spacingMs[slot] > ADSB_SPACING_STEP_MS)
-                             ? _spacingMs[slot] - ADSB_SPACING_STEP_MS : 0;
-        Serial.printf("[adsb] %s steady; spacing eased to %us\n",
-                      host, (unsigned)(_spacingMs[slot] / 1000));
-    }
 
     JsonArrayConst arr = doc["ac"].as<JsonArrayConst>();
     if (arr.isNull()) arr = doc["aircraft"].as<JsonArrayConst>();
     if (arr.isNull()) {
         // Was silent, which made a provider that answers 200 with an unexpected shape
-        // indistinguishable from one that is never tried at all.
+        // indistinguishable from one that is never tried at all. It is also not a success:
+        // pace it like a 429, or a provider that changes its payload shape gets re-asked
+        // every poll forever — exactly the loop the chunked-response bug produced.
         Serial.printf("[adsb] %s: 200 but no aircraft array (expected=%d read=%u)\n",
                       host, expectedBytes, (unsigned)jsonStream.bytesRead());
+        const uint32_t sp = _pacer.onUnusable(slot);
+        if (sp)
+            Serial.printf("[adsb] %s unusable; spacing requests %us apart\n",
+                          host, (unsigned)(sp / 1000));
         return false;
     }
+
+    // Only now is the response genuinely usable, so only now does it count as a success
+    // for pacing purposes.
+    _lastHost = host;                   // so the caller can say who served the data
+    if (_pacer.onOk(slot))
+        Serial.printf("[adsb] %s steady; spacing eased to %us\n",
+                      host, (unsigned)(_pacer.spacingMs(slot) / 1000));
 
     // Keep the ADSB_MAX_AIRCRAFT *nearest* aircraft (not just the first ones the feed happens to
     // list), so busy areas still show the traffic closest to you. We gate by distance BEFORE

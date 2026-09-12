@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include "aircraft.h"
 #include "config.h"
+#include "adsb_pacing.h"
 
 class AdsbClient {
 public:
@@ -30,36 +31,22 @@ public:
     // Which provider served the most recent successful fetch.
     const char* lastHost() const { return _lastHost ? _lastHost : "?"; }
 
+    // millis() of the last completed HTTP exchange with any provider, refusals included.
+    // A 403 arrives over a working TLS session, so it proves the heap and the network stack
+    // are healthy — which is all the caller's "feed wedged -> reboot" watchdog is asking.
+    // Without this a permanently refused feed reboots the device every three minutes, and
+    // every boot asks all three providers again.
+    uint32_t lastResponseMs() const { return _lastResponseMs; }
+
 private:
     // `slot` indexes both the provider table in adsb_client.cpp and the pacing state below.
     bool fetchFrom(int slot, std::vector<Aircraft>& out);
 
-    // Per-provider pacing. Two separate mechanisms, because the two failures differ:
-    //
-    //   403 -> a policy refusal (needs approval, or a User-Agent they reject). It will not
-    //          clear in seconds, so the provider is PARKED outright. Retrying it every poll
-    //          only burns a request and doubles the rate onto the surviving provider.
-    //
-    //   429 -> we are simply too fast. adsb.lol documents its limits as "dynamic based on
-    //          the environment load", so there is no fixed rate to hard-code. Instead keep
-    //          an adaptive minimum SPACING per provider: double it on every 429, and ease
-    //          it back down after a run of successes. That settles on the fastest rate the
-    //          provider will currently tolerate, instead of flapping between full speed and
-    //          a dead stop. An explicit Retry-After still wins and parks us for that long.
-    //
-    // All time comparisons are millis()-rollover-safe via signed subtraction.
-    uint32_t _cooldownUntil[ADSB_PROVIDER_COUNT]  = {0};
-    uint32_t _spacingMs[ADSB_PROVIDER_COUNT]      = {0};
-    uint32_t _lastAttemptMs[ADSB_PROVIDER_COUNT]  = {0};
-    uint16_t _okStreak[ADSB_PROVIDER_COUNT]       = {0};
-    bool     _cooldownLogged[ADSB_PROVIDER_COUNT] = {false};
+    // Per-provider request pacing (park on 403, adaptive spacing on 429). Lives in
+    // adsb_pacing.h so the policy can be driven on the host — see tests/adsb_pacing_test.cpp.
+    AdsbPacer _pacer;
 
-    bool cooling(int slot) const {
-        if ((int32_t)(_cooldownUntil[slot] - millis()) > 0) return true;
-        if (_spacingMs[slot] &&
-            (int32_t)(millis() - _lastAttemptMs[slot]) < (int32_t)_spacingMs[slot]) return true;
-        return false;
-    }
+    bool cooling(int slot) const { return _pacer.cooling(slot, millis()); }
 
     double _lat = 0, _lon = 0;
     float  _rangeKm = 15.0f;
@@ -69,5 +56,6 @@ private:
     bool   _milOnly = false;
     uint32_t _lastOkMs = 0;
     bool     _lastPollSkipped = false;
+    uint32_t _lastResponseMs = 0;
     const char* _lastHost = nullptr;
 };

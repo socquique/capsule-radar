@@ -535,9 +535,9 @@ static void build_weather(void) {
         s_weatherMode == WEATHER_CLOUDS ? "SAT CLOUDS" : "WEATHER");
 }
 
-// Shared by the mode button (on PRESS) and the weather image (on CLICK) -- see the two
-// registrations for why they differ. The debounce keeps a single touch from cycling twice
-// when both could fire, and swallows repeats from a held press.
+// Registered once, on the whole weather panel (see ui_create) -- the mode pill and the
+// image are deliberately non-clickable so every tap funnels here. The debounce swallows
+// repeats from a held press, and a duplicate should another target ever be added back.
 static void weather_mode_cb(lv_event_t *) {
     static uint32_t last = 0;
     const uint32_t now = lv_tick_get();
