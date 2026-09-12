@@ -552,7 +552,14 @@ static void build_weather(void) {
         s_weatherMode == WEATHER_CLOUDS ? "SAT CLOUDS" : "WEATHER");
 }
 
+// Registered once, on the whole weather panel (see ui_create) -- the mode pill and the
+// image are deliberately non-clickable so every tap funnels here. The debounce swallows
+// repeats from a held press, and a duplicate should another target ever be added back.
 static void weather_mode_cb(lv_event_t *) {
+    static uint32_t last = 0;
+    const uint32_t now = lv_tick_get();
+    if (now - last < 250) return;
+    last = now;
     s_weatherMode = (WeatherViewMode)(((int)s_weatherMode + 1) % 3);
     build_weather();
 }
@@ -884,6 +891,17 @@ void ui_create(void) {
 
     // --- weather tile (current conditions + next three days) ---
     lv_obj_t *wp = make_round_panel(s_tileWeather);
+    // The entire view cycles the weather mode: there is nothing else to touch here, and a
+    // 34px pill 18px from the bottom of a ROUND panel is a genuinely hard target -- measured
+    // presses aimed at it landed a few px low, outside it, and read as the button ignoring
+    // you. Everything below is left non-clickable so all taps funnel here.
+    //
+    // CLICKED, not PRESSED: this panel scroll-chains to the tileview, so dragging across it
+    // is how you swipe off the view. On PRESSED every such swipe would also cycle the mode.
+    // Cancel-on-scroll is exactly what a full-screen target wants -- and the finger drift
+    // that made CLICKED unreliable on a small pill no longer matters now position does not.
+    lv_obj_add_flag(wp, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(wp, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_set_style_bg_color(wp, lv_color_black(), 0); // hide square radar-tile bounds on AMOLED
     s_weatherTitle = make_tile_title(wp, "WX RADAR");
     lv_obj_set_style_bg_color(s_weatherTitle, lv_color_black(), 0);
@@ -937,8 +955,8 @@ void ui_create(void) {
     s_wxCanvas = lv_canvas_create(wp);
     lv_obj_set_size(s_wxCanvas, WX_RADAR_SIZE, WX_RADAR_SIZE);
     lv_obj_align(s_wxCanvas, LV_ALIGN_TOP_MID, 0, 52);
-    lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_wxCanvas, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
+    // Not clickable: taps pass through to the panel, which owns the whole view.
+    lv_obj_clear_flag(s_wxCanvas, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_background(s_wxCanvas);
 
@@ -1072,7 +1090,9 @@ void ui_create(void) {
     lv_obj_set_style_border_color(s_weatherModeBtn, UI_GREEN, 0);
     lv_obj_set_style_border_width(s_weatherModeBtn, 1, 0);
     lv_obj_clear_flag(s_weatherModeBtn, LV_OBJ_FLAG_SCROLL_CHAIN);
-    lv_obj_add_event_cb(s_weatherModeBtn, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
+    // Purely a label showing which mode comes next -- the panel handles the tap, so this
+    // must NOT be clickable or it would swallow presses that land on it.
+    lv_obj_clear_flag(s_weatherModeBtn, LV_OBJ_FLAG_CLICKABLE);
     s_weatherModeLbl = lv_label_create(s_weatherModeBtn);
     lv_obj_set_style_text_font(s_weatherModeLbl, F12(), 0);
     lv_obj_set_style_text_color(s_weatherModeLbl, UI_GREEN, 0);
