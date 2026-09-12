@@ -77,7 +77,8 @@ On first flash you may need to hold **BOOT** then tap **RESET**. After flashing,
 Makers can flash without installing anything using **ESP Web Tools** (Chrome or Edge on desktop):
 
 1. Open the **[web flasher](https://socquique.github.io/capsule-radar/)** (the project's GitHub Pages site).
-2. Plug the board in with a USB-C **data** cable and click **Install**.
+2. **Pick your board** (1.75″ or 1.43″) — the wrong image boots with a black screen.
+3. Plug the board in with a USB-C **data** cable and click **Install**.
 
 The flasher is built and published automatically by GitHub Actions ([`.github/workflows/webflasher.yml`](.github/workflows/webflasher.yml)) on every push to `main` — enable it once in **Settings → Pages → Source = GitHub Actions**. Tagged releases (`git tag v1.0.0 && git push origin v1.0.0`) also attach a ready-to-flash `CapsuleRadar-esp32s3.bin` to a **GitHub Release** via [`release.yml`](.github/workflows/release.yml). To preview the flasher locally:
 

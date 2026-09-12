@@ -1,0 +1,13 @@
+{
+  "name": "Capsule Radar (AMOLED 1.43)",
+  "version": "__FWVER__",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "CapsuleRadar-esp32s3-amoled143.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
