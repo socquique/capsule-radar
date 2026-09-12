@@ -2,7 +2,14 @@
 // read it from the LVGL loop (core 1), not the network task.
 #include "battery.h"
 #include "config.h"
+
 #include <Arduino.h>
+
+// Boards without an AXP2101 (e.g. the 1.43) compile to no-ops and simply report
+// "no battery", which the UI already handles. That board does bring a divided
+// battery voltage out on PIN_BAT_ADC, but the divider ratio is undocumented, so
+// no percentage is reported rather than an invented one.
+#if BOARD_HAS_PMIC
 #include <Wire.h>
 #define XPOWERS_CHIP_AXP2101
 #include "XPowersLib.h"
@@ -32,3 +39,13 @@ void battery_enable_codec_rail() {
     PMU.enableALDO1();
     Serial.println("[batt] ALDO1 (codec AVDD) enabled @3.3V");
 }
+
+#else   // !BOARD_HAS_PMIC
+
+bool battery_begin()   { Serial.println("[batt] no PMIC on this board"); return false; }
+bool battery_present() { return false; }
+int  battery_percent() { return -1; }
+bool battery_charging(){ return false; }
+void battery_enable_codec_rail() {}
+
+#endif  // BOARD_HAS_PMIC

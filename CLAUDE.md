@@ -14,8 +14,16 @@ The visual target is in `assets/plane_radar_2.0_mockup.html` — open it in a br
 - Display: CO5300 AMOLED, 466×466, QSPI. Brightness via panel command (no PWM backlight pin).
 - Touch: CST9217, I2C.
 - IMU: QMI8658 (I2C). RTC: PCF85063 (I2C). PMIC: AXP2101 (I2C 0x34). Audio: ES8311 codec + speaker, dual mic.
-- **Verified pins**: LCD_CS=12, LCD_RST=39, TP_INT=11, TP_RST=40, touch mirror_x/y = true.
-- **Pins still to confirm from the official demo**: QSPI SCLK + D0..D3, and the shared I2C SDA/SCL. Do NOT guess these — copy them from the Waveshare Arduino factory demo (see below). They are left as `-1` placeholders in `src/config.h`.
+- All pins for the reference board are confirmed and live in `src/boards/board_amoled_175.h`.
+
+### Second supported board: ESP32-S3-Touch-AMOLED-1.43
+Same SoC and the same 466x466 CO5300 panel, but a **completely different pin map**, an
+**FT3168** touch controller, and **no PMIC and no audio codec**. Pins are confirmed and live
+in `src/boards/board_amoled_143.h`. Build it with `-e esp32-s3-amoled-143`.
+Gotchas worth remembering: its FT3168 shares the panel reset, so it is absent from I2C until
+the display is initialised, and its QSPI CS/SCLK (GPIO 9/10) are the 1.75's I2S BCLK/DIN —
+which is why audio must stay compiled out here. The panel gap is the same 6 as the 1.75.
+Full detail in `docs/HARDWARE.md`.
 
 ## Stack decision
 **PlatformIO + Arduino framework.** Libraries:
@@ -57,7 +65,8 @@ plane-radar-2.0/
 ├─ README.md
 ├─ platformio.ini
 ├─ src/
-│  ├─ config.h           ← user/build config + pin map (EDIT pins from demo)
+│  ├─ config.h           ← shared tunables; selects a board header
+│  ├─ boards/            ← one header per board (pin map, panel gaps, what's fitted)
 │  ├─ geo.h              ← haversine / bearing / project-to-screen (complete)
 │  ├─ aircraft.h         ← Aircraft data model
 │  ├─ adsb_client.h/.cpp ← fetch + parse airplanes.live (working draft, untested on HW)
@@ -75,11 +84,13 @@ plane-radar-2.0/
 
 ## Build / flash
 ```
-pio run                        # build
-pio run -t upload              # flash over USB-C
-pio device monitor -b 115200   # serial
+pio run -e esp32-s3-amoled-175              # build (reference board)
+pio run -e esp32-s3-amoled-143              # build (1.43)
+pio run -e esp32-s3-amoled-175 -t upload    # flash over USB-C
+pio device monitor -b 115200                # serial
 ```
-First make the Waveshare `01_HelloWorld` equivalent light up, then bring this scaffold's pins in line and build upward through the milestones.
+Always pass `-e`; there is one env per board. The boot log names the board an image was
+built for — check it first when a screen stays black.
 
 ## Roadmap (suggested milestones)
 - **M0 — Bring-up**: get the official HelloWorld/LVGL widgets demo running; copy verified databus + I2C pins into `config.h`. Backlight + touch + a "hello" screen.
@@ -93,5 +104,6 @@ First make the Waveshare `01_HelloWorld` equivalent light up, then bring this sc
 - Touch the shared aircraft vector only under `xSemaphoreTake(g_ac_mutex, ...)`.
 - All tunables live in `config.h`. No magic numbers in render code.
 - HTTPS: for a hobby device `WiFiClientSecure::setInsecure()` is acceptable; a pinned root cert is the "proper" option — note the choice in code.
-- **Never invent the unknown GPIO pins.** They come from the official demo. Placeholders are `-1` and the build should assert/log if they're still `-1`.
+- **Never invent GPIO pins.** They come from the official demo or the Arduino core's board variant, and must be confirmed on hardware (I2C scan + a full-panel test pattern) before being committed. Board headers assert at compile time if a pin is still `-1`.
+- **Anything board-specific belongs in `src/boards/`,** behind a `-DBOARD_*` flag — never hardcoded in a driver. Peripherals that a board lacks are compiled out via `BOARD_HAS_*` rather than left to fail at runtime.
 - API is non-commercial; keep request cadence gentle and User-Agent honest.

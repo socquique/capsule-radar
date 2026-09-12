@@ -25,20 +25,36 @@ jobs:
       - name: Install PlatformIO + esptool
         run: pip install platformio esptool
 
-      - name: Build firmware
-        run: pio run -e esp32-s3-amoled-175
-
-      - name: Merge into a single flashable binary
+      # Every supported board is built and attached to the same release. The 1.75 keeps
+      # the historic unsuffixed filenames so existing links and instructions still work;
+      # other boards carry a suffix (e.g. CapsuleRadar-esp32s3-amoled143.bin).
+      - name: Build and merge every board
         run: |
-          B=.pio/build/esp32-s3-amoled-175
-          BOOT_APP0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' | head -1)"
-          python -m esptool --chip esp32s3 merge_bin -o CapsuleRadar-esp32s3.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 16MB \
-            0x0     "$B/bootloader.bin" \
-            0x8000  "$B/partitions.bin" \
-            0xe000  "$BOOT_APP0" \
-            0x10000 "$B/firmware.bin"
-          cp "$B/firmware.bin" CapsuleRadar-ota.bin   # app-only image for the device's web OTA page
+          set -euo pipefail
+          build() {   # build <pio-env> <filename-suffix>
+            local env="$1" sfx="$2" b=".pio/build/$1"
+            pio run -e "$env"
+            # Look for boot_app0.bin AFTER the build, not before: on a clean runner
+            # ~/.platformio/packages does not exist until the first `pio run` installs the
+            # toolchain, so hoisting this above the builds silently yields an empty path and
+            # esptool then fails with "No such file or directory: ''".
+            local boot_app0
+            boot_app0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' 2>/dev/null | head -1)"
+            if [ -z "$boot_app0" ]; then
+              echo "::error::boot_app0.bin not found under $HOME/.platformio/packages after building $env"
+              find "$HOME/.platformio/packages" -name '*.bin' 2>/dev/null | head -20
+              return 1
+            fi
+            python -m esptool --chip esp32s3 merge_bin -o "CapsuleRadar-esp32s3$sfx.bin" \
+              --flash_mode dio --flash_freq 80m --flash_size 16MB \
+              0x0     "$b/bootloader.bin" \
+              0x8000  "$b/partitions.bin" \
+              0xe000  "$boot_app0" \
+              0x10000 "$b/firmware.bin"
+            cp "$b/firmware.bin" "CapsuleRadar-ota$sfx.bin"   # app-only image for the web OTA page
+          }
+          build esp32-s3-amoled-175 ""
+          build esp32-s3-amoled-143 "-amoled143"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -46,6 +62,8 @@ jobs:
           files: |
             CapsuleRadar-esp32s3.bin
             CapsuleRadar-ota.bin
+            CapsuleRadar-esp32s3-amoled143.bin
+            CapsuleRadar-ota-amoled143.bin
           generate_release_notes: true
           body: |
             **First flash (USB):** `CapsuleRadar-esp32s3.bin` — the full merged image (offset `0x0`).
@@ -55,3 +73,9 @@ jobs:
             **Update over WiFi (no cable):** `CapsuleRadar-ota.bin` — the app-only image.
             Open `http://capsuleradar.local/update` on the device and upload this file.
             (Do **not** upload the merged image there.)
+
+            **Which file?** Unsuffixed files are for the reference **ESP32-S3-Touch-AMOLED-1.75**.
+            Files with `amoled143` in the name are for the **ESP32-S3-Touch-AMOLED-1.43**.
+            The two boards have completely different pin maps — the wrong image gives a
+            black screen, so check your board before flashing. (The browser flasher
+            currently installs the 1.75 build only.)
