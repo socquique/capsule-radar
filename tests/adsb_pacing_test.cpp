@@ -15,21 +15,30 @@ int main() {
         assert(!p.cooling(0, 1001));      // no spacing imposed yet: ask as often as we like
     }
 
-    // --- 403 parks the provider for the full cooldown, and announces exactly once ---
+    // --- 403 parks the provider, escalates on repeat, and announces exactly once ---
     {
         AdsbPacer p;
         assert(p.onRefused(0, 1000));                       // first refusal: caller logs it
         assert(p.cooling(0, (uint32_t)(1000 + ADSB_COOLDOWN_403_MS - 1)));
         assert(!p.cooling(0, (uint32_t)(1000 + ADSB_COOLDOWN_403_MS)));   // 15 min: try again
 
-        // A second refusal re-parks from that moment (so a provider that keeps saying no is
-        // never asked more than once per cooldown) and stays quiet on the serial log.
+        // Since airplanes.live went contributor-only, a repeated "no" escalates: the second
+        // refusal parks twice as long (and stays quiet on the serial log).
         assert(!p.onRefused(0, 3000));
-        assert(p.cooling(0, (uint32_t)(3000 + ADSB_COOLDOWN_403_MS - 1)));
-        assert(!p.cooling(0, (uint32_t)(3000 + ADSB_COOLDOWN_403_MS)));
+        assert(p.cooling(0, (uint32_t)(3000 + 2 * ADSB_COOLDOWN_403_MS - 1)));
+        assert(!p.cooling(0, (uint32_t)(3000 + 2 * ADSB_COOLDOWN_403_MS)));
 
+        // ...and caps at ADSB_COOLDOWN_403_MAX_MS no matter how many refusals pile up.
+        const uint32_t t = 5000;
+        for (int i = 0; i < 12; ++i) p.onRefused(0, t);
+        assert(p.cooling(0, (uint32_t)(t + ADSB_COOLDOWN_403_MAX_MS - 1)));
+        assert(!p.cooling(0, (uint32_t)(t + ADSB_COOLDOWN_403_MAX_MS)));
+
+        // A success resets the ladder to the 15 min base and makes the next park news again.
         p.onOk(0);
-        assert(p.onRefused(0, 999999));                     // recovered, so a new park is news
+        assert(p.onRefused(0, 999999));
+        assert(p.cooling(0, (uint32_t)(999999 + ADSB_COOLDOWN_403_MS - 1)));
+        assert(!p.cooling(0, (uint32_t)(999999 + ADSB_COOLDOWN_403_MS)));
     }
 
     // --- 429 backs off multiplicatively and caps ---

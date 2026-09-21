@@ -1,12 +1,16 @@
 # Data source — ADS-B feed
 
-## Primary: airplanes.live (free, no key)
-Independent ADS-B/MLAT aggregator. **Educational / non-commercial use only** — fits this project. Be a good citizen: poll every 1–2 s max, send a descriptive `User-Agent`.
+## Primary: airplanes.live (contributor-only)
+Independent, community-owned ADS-B/MLAT aggregator. **Educational / non-commercial use only** — fits this project. Be a good citizen: poll every 1–2 s max, send a descriptive `User-Agent`.
 
-> **Access now requires prior approval.** Unapproved clients get `403` with
-> *"Please contact us at contact@airplanes.live. Your email MUST include any links, a
-> description of the project, and any information you deem appropriate."* Until that is
-> granted the firmware parks this provider and runs on the two below.
+> **Access is now contributor-only (since Sept 2026), granted by IP.** If you run one of
+> their feeders (an ADS-B receiver contributing data — see
+> <https://airplanes.live/get-started/>), every device on the same network gets the API
+> automatically, this radar included: nothing to configure, no keys exist. Everyone else
+> gets `403`; the firmware then parks this provider with an **escalating backoff (15 min
+> doubling up to 6 h)** and runs on the two below — start feeding and the provider comes
+> back within hours, or immediately after a reboot. Running a feeder is also the way to
+> support them; their hosting costs are real.
 
 ### Endpoint (position + radius)
 ```

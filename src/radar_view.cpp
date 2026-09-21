@@ -33,6 +33,10 @@
 #define COL_INK    lv_color_hex(0xEAFFF3)
 #define COL_SOFT   lv_color_hex(0x9AFFC8)
 #define COL_EMERG  lv_color_hex(0xFF5A3C)
+// Emergency glyph CORE. White on purpose: no altitude band uses white, so a red-ringed
+// white glyph cannot be confused with the plain red sub-3000 ft fill — two users (#25)
+// read low-altitude red + the new-contact ping as an emergency.
+#define COL_EMERG_CORE lv_color_hex(0xFFFFFF)
 // coastline outline — steel blue, deliberately off the red/amber/lime/green/cyan
 // altitude-trail palette so land never reads as an aircraft track.
 #define COAST_COLOR lv_color_hex(0x4E86C6)
@@ -466,13 +470,13 @@ static void ac_draw_cb(lv_event_t *e) {
             }
             lv_draw_rect_dsc_t g;
             lv_draw_rect_dsc_init(&g);
-            g.bg_color = ac.color;
+            g.bg_color = ac.emergency ? COL_EMERG_CORE : ac.color;   // white core, see define
             g.bg_opa = LV_OPA_COVER;
             lv_draw_polygon(d, &g, pts, 4);
             if (ac.emergency) {
                 lv_draw_arc_dsc_t h;
                 lv_draw_arc_dsc_init(&h);
-                h.color = COL_EMERG; h.width = 2; h.opa = 200;
+                h.color = COL_EMERG; h.width = 3; h.opa = 255;
                 lv_draw_arc(d, &h, &ac.pos, 16, 0, 360);
             }
         }
