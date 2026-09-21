@@ -38,8 +38,19 @@ public:
 
     // HTTP 403. Returns true only the first time since the last success, so the caller
     // announces the park once instead of on every poll.
+    //
+    // The park ESCALATES: 15 min, 30, 60 ... capped at 6 h. Since airplanes.live went
+    // contributor-only (2026-09, access granted by feeder IP), a 403 means "this network is
+    // not a contributor" — a state that never clears in minutes, so re-knocking every
+    // 15 min forever is just noise on their door. Doubling the park makes a refused device
+    // near-silent within a few hours, while someone who starts feeding gets the provider
+    // back automatically the same day (or immediately on reboot). Any success resets the
+    // ladder to 15 min.
     bool onRefused(int slot, uint32_t nowMs) {
-        _cooldownUntil[slot] = nowMs + ADSB_COOLDOWN_403_MS;
+        const uint32_t park = _park403Ms[slot] ? _park403Ms[slot] : ADSB_COOLDOWN_403_MS;
+        _cooldownUntil[slot] = nowMs + park;
+        _park403Ms[slot] = (park >= ADSB_COOLDOWN_403_MAX_MS / 2)
+                             ? ADSB_COOLDOWN_403_MAX_MS : park * 2;
         if (_cooldownLogged[slot]) return false;
         _cooldownLogged[slot] = true;
         return true;
@@ -60,6 +71,7 @@ public:
     // A usable response. Returns true when the spacing was eased (for logging).
     bool onOk(int slot) {
         _cooldownLogged[slot] = false;      // healthy again: allow a future park to be announced
+        _park403Ms[slot] = 0;               // and restart the 403 escalation ladder at 15 min
         // Ease the imposed gap back down after a sustained good run, so a one-off busy period
         // upstream does not slow us permanently. Additive decrease against the multiplicative
         // increase above: quick to back off, cautious to speed up.
@@ -83,6 +95,7 @@ private:
     }
 
     uint32_t _cooldownUntil[ADSB_PROVIDER_COUNT]  = {0};
+    uint32_t _park403Ms[ADSB_PROVIDER_COUNT]      = {0};   // next 403 park length; 0 = base (15 min)
     uint32_t _spacingMs[ADSB_PROVIDER_COUNT]      = {0};
     uint32_t _lastAttemptMs[ADSB_PROVIDER_COUNT]  = {0};
     uint16_t _okStreak[ADSB_PROVIDER_COUNT]       = {0};

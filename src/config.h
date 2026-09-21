@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.4.0-tcas.4"   // TCAS beta branch; bump on release
+#define FW_VERSION "1.4.1-tcas.5"   // TCAS beta branch; bump on release
 
 // ---------- Home location (default: Dénia, Spain) ----------
 // Overridable at runtime via the captive portal (stored in NVS).
@@ -65,7 +65,8 @@ static const float RANGE_STEPS_TCAS_NM[] = {5.0f, 10.0f, 20.0f, 40.0f, 80.0f};
 // approval, or a User-Agent they reject) and will not clear in seconds; 429 just means
 // we were too fast. Without these, a permanently-403 provider is retried every poll,
 // which doubles the request rate onto the surviving provider and trips ITS rate limit.
-#define ADSB_COOLDOWN_403_MS  900000UL      // 15 min park after a policy refusal
+#define ADSB_COOLDOWN_403_MS  900000UL      // first park after a policy refusal (15 min)
+#define ADSB_COOLDOWN_403_MAX_MS 21600000UL // cap for the escalating 403 park (6 h) — see AdsbPacer::onRefused
 #define ADSB_SPACING_STEP_MS    4000UL      // first extra gap imposed after a 429
 #define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
 #define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down

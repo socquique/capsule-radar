@@ -40,27 +40,32 @@ jobs:
       - name: Install PlatformIO + esptool
         run: pip install platformio esptool
 
-      - name: Build firmware
-        run: pio run -e esp32-s3-amoled-175
+      - name: Build firmware (all boards)
+        run: |
+          pio run -e esp32-s3-amoled-175
+          pio run -e esp32-s3-amoled-143
 
       - name: Host tests
         run: ./tests/run_host_tests.sh
 
-      - name: Merge into a single flashable binary
+      - name: Merge flashable binaries (all boards)
         run: |
-          B=.pio/build/esp32-s3-amoled-175
           BOOT_APP0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' | head -1)"
           mkdir -p site
-          cp web/flash/index.html web/flash/manifest.json site/
-          # stamp the flasher page + manifest with the firmware version being built
+          cp web/flash/index.html web/flash/manifest.json web/flash/manifest-amoled143.json site/
+          # stamp the flasher page + manifests with the firmware version being built
           VER=$(grep -oE 'FW_VERSION "[0-9.]+"' src/config.h | grep -oE '[0-9.]+' | head -1)
-          sed -i "s/__FWVER__/${VER:-dev}/g" site/index.html site/manifest.json
-          python -m esptool --chip esp32s3 merge_bin -o site/CapsuleRadar-esp32s3.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 16MB \
-            0x0     "$B/bootloader.bin" \
-            0x8000  "$B/partitions.bin" \
-            0xe000  "$BOOT_APP0" \
-            0x10000 "$B/firmware.bin"
+          sed -i "s/__FWVER__/${VER:-dev}/g" site/index.html site/manifest.json site/manifest-amoled143.json
+          merge() {   # merge <pio-env> <output-bin>
+            python -m esptool --chip esp32s3 merge_bin -o "$2" \
+              --flash_mode dio --flash_freq 80m --flash_size 16MB \
+              0x0     ".pio/build/$1/bootloader.bin" \
+              0x8000  ".pio/build/$1/partitions.bin" \
+              0xe000  "$BOOT_APP0" \
+              0x10000 ".pio/build/$1/firmware.bin"
+          }
+          merge esp32-s3-amoled-175 site/CapsuleRadar-esp32s3.bin
+          merge esp32-s3-amoled-143 site/CapsuleRadar-esp32s3-amoled143.bin
 
       - uses: actions/upload-pages-artifact@v3
         with:

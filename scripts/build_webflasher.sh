@@ -8,26 +8,32 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ENV=esp32-s3-amoled-175
-B=".pio/build/$ENV"
-OUT="web/flash/CapsuleRadar-esp32s3.bin"
-
-echo "==> Building firmware ($ENV)"
-pio run -e "$ENV"
-
 echo "==> Locating tools"
-BOOT_APP0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' 2>/dev/null | head -1)"
-ESPTOOL="$(find "$HOME/.platformio/packages" -name esptool.py -path '*tool-esptoolpy*' 2>/dev/null | head -1)"
 PY="$HOME/.platformio/penv/bin/python"
 [ -x "$PY" ] || PY=python3
 
-echo "==> Merging bootloader + partitions + app -> $OUT"
-mkdir -p web/flash
-"$PY" "$ESPTOOL" --chip esp32s3 merge_bin -o "$OUT" \
-  --flash_mode dio --flash_freq 80m --flash_size 16MB \
-  0x0     "$B/bootloader.bin" \
-  0x8000  "$B/partitions.bin" \
-  0xe000  "$BOOT_APP0" \
-  0x10000 "$B/firmware.bin"
+build_one() {   # build_one <pio-env> <output-bin>
+  local env="$1" out="$2" b=".pio/build/$1"
+  echo "==> Building firmware ($env)"
+  pio run -e "$env"
+  # locate AFTER the build: on a fresh machine the packages dir appears with the first pio run
+  local boot_app0
+  boot_app0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' 2>/dev/null | head -1)"
+  # PlatformIO's bundled tool-esptoolpy can be ancient (no esp32s3); prefer the pip module.
+  if ! "$PY" -m esptool version >/dev/null 2>&1; then
+    echo "==> Installing esptool into the PlatformIO penv"
+    "$PY" -m pip install -q esptool
+  fi
+  echo "==> Merging bootloader + partitions + app -> $out"
+  mkdir -p web/flash
+  "$PY" -m esptool --chip esp32s3 merge_bin -o "$out" \
+    --flash_mode dio --flash_freq 80m --flash_size 16MB \
+    0x0     "$b/bootloader.bin" \
+    0x8000  "$b/partitions.bin" \
+    0xe000  "$boot_app0" \
+    0x10000 "$b/firmware.bin"
+  echo "==> Done: $out ($(du -h "$out" | cut -f1))"
+}
 
-echo "==> Done: $OUT ($(du -h "$OUT" | cut -f1))"
+build_one esp32-s3-amoled-175 web/flash/CapsuleRadar-esp32s3.bin
+build_one esp32-s3-amoled-143 web/flash/CapsuleRadar-esp32s3-amoled143.bin

@@ -29,7 +29,7 @@ A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Touch-AMOLED-1.75**
 
 ## Features
 
-- **Live traffic** from [airplanes.live](https://airplanes.live), [adsb.fi](https://adsb.fi/) and [adsb.lol](https://adsb.lol) (free, non-commercial), updated every couple of seconds. Each provider is paced independently, so one refusing or rate-limiting does not stop the feed. Memory-safe streaming parser with a hard aircraft cap.
+- **Live traffic** from [airplanes.live](https://airplanes.live), [adsb.fi](https://adsb.fi/) and [adsb.lol](https://adsb.lol) (free, non-commercial), updated every couple of seconds. Each provider is paced independently, so one refusing or rate-limiting does not stop the feed. Memory-safe streaming parser with a hard aircraft cap. *Note: airplanes.live is now [contributor-only](https://airplanes.live/get-started/) — if you run one of their feeders, your radar uses their API automatically from the same network (no keys, nothing to configure); otherwise it quietly falls back to adsb.fi / adsb.lol.*
 - **Four themes** (long-press the screen to cycle, or pick on the web; remembered across reboots):
   - **Phosphor** — green-on-black radar scope: rings, animated sweep, aircraft glyphs rotated by heading and color-coded by altitude, fading trails, emergency halo.
   - **Orb** — green gradient + grid scope: the 7 nearest aircraft as yellow orbs emitting waves, off-range traffic as edge arrows pointing its way, orange target rings.
@@ -62,6 +62,23 @@ The Waveshare **ESP32-S3-Touch-AMOLED-1.43** is also supported in-tree. Same SoC
 
 Pin maps live in [`src/boards/`](src/boards/), one header per board, selected by a `-DBOARD_*` build flag. They are taken from the vendor board definition and then **confirmed on hardware** — never guessed. Shared tunables stay in [`src/config.h`](src/config.h).
 
+### Where to buy the board
+
+The 1.75″ board is in a **global stock squeeze** right now (even Waveshare lists it on backorder), so availability moves week to week. The official store is the reference; the Amazon links are what is actually in stock as of this writing.
+
+| Board | Waveshare official (ships worldwide) | Amazon (affiliate links) |
+|---|---|---|
+| **1.75″ standard** — no case; the one the printed enclosure needs | [product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm) (backorder) | 🇺🇸 [.com](https://www.amazon.com/dp/B0F7XTJ1ZL?tag=capsuleradar-20) · 🇪🇸 [.es](https://www.amazon.es/dp/B0F7XTJ1ZL?tag=capsuleradar-21) · 🇩🇪 [.de](https://www.amazon.de/dp/B0F7XTJ1ZL?tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/dp/B0F7XTJ1ZL?tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/dp/B0F7XTJ1ZL?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0F7XTJ1ZL?tag=capsulerada0e-21) — official Waveshare listing, restocking |
+| **1.75″ -G** — adds GPS (auto-location, heading-up) | same page, pick the **-G** option | 🇺🇸 [.com](https://www.amazon.com/dp/B0F7XWWMJW?tag=capsuleradar-20) · 🇪🇸 [.es](https://www.amazon.es/dp/B0F7XWWMJW?tag=capsuleradar-21) · 🇩🇪 [.de](https://www.amazon.de/dp/B0F7XWWMJW?tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/dp/B0F7XWWMJW?tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/dp/B0F7XWWMJW?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0F7XWWMJW?tag=capsulerada0e-21) — official Waveshare listing, restocking · 🇺🇸 [third-party, in stock](https://www.amazon.com/dp/B0F8867487?tag=capsuleradar-20) |
+| **1.75″ -B** — the same board inside Waveshare's own case. Works, but you must open that case yourself and its shell is **not** the printed enclosure | same page, pick the **-B** option | 🇺🇸 [.com](https://www.amazon.com/dp/B0F7XTJ7JW?tag=capsuleradar-20) · 🇪🇸 [.es](https://www.amazon.es/dp/B0F7XTJ7JW?tag=capsuleradar-21) · 🇩🇪 [.de](https://www.amazon.de/dp/B0F7XTJ7JW?tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/dp/B0F7XTJ7JW?tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/dp/B0F7XTJ7JW?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0F7XTJ7JW?tag=capsulerada0e-21) |
+| **1.43″** — the second supported board | [product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.43.htm), pick **without case** | 🇪🇸 [.es](https://www.amazon.es/dp/B0DV3KM88S?tag=capsuleradar-21) · 🇩🇪 [.de](https://www.amazon.de/dp/B0DV3KM88S?tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/dp/B0DV3KM88S?tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/dp/B0DV3KM88S?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0DV3KM88S?tag=capsulerada0e-21) — no US listing; use the Waveshare store there |
+| **Battery** (optional) — 3.7 V LiPo, 1100 mAh, protection board, JST/MX1.25 plug (the one I run myself) | — | 🇪🇸 [.es](https://www.amazon.es/dp/B0F1FGZQS5?tag=capsuleradar-21) · 🇺🇸 [.com](https://www.amazon.com/dp/B0F1FGZQS5?tag=capsuleradar-20) · 🇮🇹 [.it](https://www.amazon.it/dp/B0F1FGZQS5?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0F1FGZQS5?tag=capsulerada0e-21) (DE/UK: that exact pack is not listed — search for a *protected* 3.7 V LiPo, ~1100 mAh, size **102540**, 1.25 mm micro-JST plug) — ⚠️ check the plug's **polarity** against the board's markings before connecting; it is not standardised across vendors |
+| **Printed-parts hardware** — 6×2 mm disc magnets + M2×5 screws (counts per case variant on the MakerWorld page) | — | Magnets, the ones I used: 🇪🇸 [.es](https://www.amazon.es/dp/B0F4BZ447N?tag=capsuleradar-21) — elsewhere search "neodymium magnets 6x2mm": 🇺🇸 [.com](https://www.amazon.com/s?k=neodymium+magnets+6x2mm&tag=capsuleradar-20) · 🇩🇪 [.de](https://www.amazon.de/s?k=neodym+magnete+6x2mm&tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/s?k=neodymium+magnets+6x2mm&tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/s?k=magneti+neodimio+6x2mm&tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/s?k=aimants+neodyme+6x2mm&tag=capsulerada0e-21). M2×5 screws: 🇪🇸 [.es](https://www.amazon.es/s?k=tornillos+M2x5&tag=capsuleradar-21) · 🇺🇸 [.com](https://www.amazon.com/s?k=M2x5+machine+screws&tag=capsuleradar-20) |
+
+> ⚠️ **Do not buy the “1.75C”** (`ESP32-S3-Touch-AMOLED-1.75C`, aluminum case): despite the name it is a **different board** and this firmware does not run on it.
+
+<sub>The Amazon links are affiliate links — as an Amazon Associate I earn from qualifying purchases, at no extra cost to you. The Waveshare links are plain links.</sub>
+
 ## Build & flash (PlatformIO)
 
 ```bash
@@ -77,7 +94,8 @@ On first flash you may need to hold **BOOT** then tap **RESET**. After flashing,
 Makers can flash without installing anything using **ESP Web Tools** (Chrome or Edge on desktop):
 
 1. Open the **[web flasher](https://socquique.github.io/capsule-radar/)** (the project's GitHub Pages site).
-2. Plug the board in with a USB-C **data** cable and click **Install**.
+2. **Pick your board** (1.75″ or 1.43″) — the wrong image boots with a black screen.
+3. Plug the board in with a USB-C **data** cable and click **Install**.
 
 The flasher is built and published automatically by GitHub Actions ([`.github/workflows/webflasher.yml`](.github/workflows/webflasher.yml)) on every push to `main` — enable it once in **Settings → Pages → Source = GitHub Actions**. Tagged releases (`git tag v1.0.0 && git push origin v1.0.0`) also attach a ready-to-flash `CapsuleRadar-esp32s3.bin` to a **GitHub Release** via [`release.yml`](.github/workflows/release.yml). To preview the flasher locally:
 

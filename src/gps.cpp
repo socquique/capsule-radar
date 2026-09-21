@@ -18,13 +18,18 @@
 #define GPS_ADDR_W      0x50
 #define GPS_ADDR_R      0x54
 #define GPS_SETTLE_MS   100        // settle between each protocol step (LC76G is fussy)
-#define GPS_READ_MAX    720        // max bytes drained per transaction (kept small: a big Wire RX
-                                   //   buffer steals the contiguous internal RAM the TLS feed needs)
-#define GPS_BUF         768        // fixed Wire RX buffer (>= GPS_READ_MAX); set once, never resized
-#define GPS_POLL_MS     2000       // poll often enough that a 720 B read keeps up with NMEA output
-#define GPS_POLL_FIX_MS 60000      // once fixed, home is set — back right off (rare blocking hitch)
-#define GPS_FIX_TTL_MS  70000      // how long a fix stays "valid" — must exceed GPS_POLL_FIX_MS so the
-                                   //   fix doesn't expire between the 60 s polls (else it re-polls early)
+// Read size + cadence reworked after issue #24 (@xatarsixnine-stack, field-verified): backing
+// off to 60 s polls once fixed let the module's internal NMEA queue overflow, and a wedged
+// LC76G stops answering until a full power cycle. The fix is to KEEP draining after the fix
+// and to drain big enough to always outrun the NMEA output (multi-GNSS GSV bursts exceed
+// 1 KB/s). 4 KB every 2 s is 4x that worst case. The bigger Wire RX buffer is still sized
+// exactly once, in gps_begin() at boot BEFORE TLS comes up, and only on -G boards — the
+// runtime-resize heap-fragmentation gotcha in the file header still stands.
+#define GPS_READ_MAX    4096       // max bytes drained per transaction (issue #24; was 720)
+#define GPS_BUF         4160       // fixed Wire RX buffer (>= GPS_READ_MAX); set once, never resized
+#define GPS_POLL_MS     2000       // continuous drain cadence, fix or no fix — same blocking
+                                   //   hitch users already had pre-fix, now just permanent
+#define GPS_FIX_TTL_MS  70000      // how long a fix stays "valid" without fresh sentences
 #define GPS_I2C_HZ      100000     // the read protocol is unreliable at the 400 kHz bus default
 #define GPS_BUS_HZ      400000     // restore the shared bus to this after each GPS transaction
 #define GPS_TIMEOUT_MS  1000       // the module clock-stretches while preparing data; 50 ms (default) times out
@@ -96,8 +101,9 @@ void gps_poll() {
     if (!s_present) return;
     static uint32_t last = 0;
     const uint32_t now = millis();
-    const uint32_t interval = gps_has_fix() ? GPS_POLL_FIX_MS : GPS_POLL_MS;
-    if (last != 0 && now - last < interval) return;
+    // Same cadence with or without a fix: the module never stops emitting NMEA, so WE must
+    // never stop draining it, or its queue overflows and it wedges until power-cycled (#24).
+    if (last != 0 && now - last < GPS_POLL_MS) return;
     last = now;
 
     Wire.setClock(GPS_I2C_HZ); Wire.setTimeOut(GPS_TIMEOUT_MS);   // LC76G read path: 100 kHz + tolerate clock-stretch

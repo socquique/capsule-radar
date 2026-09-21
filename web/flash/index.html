@@ -32,22 +32,46 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .ver { color:var(--soft); font-size:13px; margin-top:14px; }
   .ver b { color: var(--green); }
+  .boards { display:flex; gap:10px; margin: 0 0 18px; }
+  .board { flex:1; display:flex; flex-direction:column; gap:2px; cursor:pointer;
+           background:#0c1a12; border:1px solid #1f3a2b; border-radius:12px; padding:10px 8px; }
+  .board.sel { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+  .board input { display:none; }
+  .board b { color: var(--ink); font-size:16px; }
+  .board span { color:#7fae97; font-size:11px; line-height:1.3; }
 </style>
 </head>
 <body>
   <div class="radar"></div>
   <h1>Capsule Radar</h1>
-  <div class="sub">Live ADS-B aircraft radar · Waveshare ESP32-S3-Touch-AMOLED-1.75</div>
+  <div class="sub">Live ADS-B aircraft radar · Waveshare ESP32-S3 round AMOLED boards</div>
 
   <div class="card">
     <p style="margin-top:0">Flash the firmware straight from your browser — no toolchain, no PlatformIO.</p>
-    <esp-web-install-button manifest="manifest.json">
+    <div class="boards" id="boards">
+      <label class="board sel"><input type="radio" name="board" value="manifest.json" checked>
+        <b>1.75&Prime;</b><span>ESP32-S3-Touch-AMOLED-1.75 (also -G)</span></label>
+      <label class="board"><input type="radio" name="board" value="manifest-amoled143.json">
+        <b>1.43&Prime;</b><span>ESP32-S3-Touch-AMOLED-1.43</span></label>
+    </div>
+    <esp-web-install-button id="install" manifest="manifest.json">
       <button slot="activate">⚡ Install Capsule Radar</button>
       <span slot="unsupported">Use Chrome or Edge on desktop (Web Serial required).</span>
       <span slot="not-allowed">Serve this page over HTTPS to flash.</span>
     </esp-web-install-button>
     <div class="ver">Installs firmware <b>v__FWVER__</b></div>
+    <div class="note" style="margin-top:10px">Pick the board you actually have — the wrong image
+      boots with a <b>black screen</b> (harmless: flash the right one to fix it).</div>
   </div>
+  <script>
+    document.querySelectorAll('input[name=board]').forEach(function (r) {
+      r.addEventListener('change', function () {
+        document.getElementById('install').setAttribute('manifest', r.value);
+        document.querySelectorAll('.board').forEach(function (l) { l.classList.remove('sel'); });
+        r.closest('.board').classList.add('sel');
+      });
+    });
+  </script>
 
   <div class="card">
     <ol>
