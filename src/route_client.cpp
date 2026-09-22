@@ -10,7 +10,12 @@
 #include <string.h>
 #include <time.h>   // route-cache TTL
 
-#define ROUTE_CACHE_MAX 200   // wrap the cache before it can crowd NVS
+// The NVS partition is 20 KB (~500 usable entries) and is SHARED with the settings
+// namespace. Each cached route costs ~3 entries (key + two 32 B value chunks), so the old
+// cap of 200 could fill the whole partition before the wrap below ever fired — and once
+// NVS is full, EVERY write on the device fails, including brightness/volume saves (field
+// report: MakerWorld, @alehsoares, v1.4.2). 100 routes ≈ 300 entries leaves real headroom.
+#define ROUTE_CACHE_MAX 100   // wrap the cache long before it can crowd NVS
 
 // strip spaces -> a valid NVS key (callsigns are <= 8 chars)
 static void route_key(const char *callsign, char *out, size_t on) {
@@ -20,7 +25,9 @@ static void route_key(const char *callsign, char *out, size_t on) {
     out[j] = 0;
 }
 
-#define ROUTE_FMT_VER 2   // bump to invalidate cached routes when the label format changes
+#define ROUTE_FMT_VER 3   // bump to invalidate cached routes when the label format changes
+                          // (3: also clears caches bloated by the old 200 cap — frees the
+                          //  NVS of every device whose settings had stopped saving)
 
 void route_cache_begin() {
     Preferences p;
@@ -62,9 +69,17 @@ void route_cache_put(const char *callsign, const char *from, const char *to) {
     Preferences p;
     if (!p.begin("routes", false)) return;
     int n = p.getInt("__n", 0);
-    if (n >= ROUTE_CACHE_MAX) { p.clear(); n = 0; }   // wrap to bound NVS usage
+    if (n >= ROUTE_CACHE_MAX) { p.clear(); p.putUChar("__v", ROUTE_FMT_VER); n = 0; }  // wrap to bound NVS usage
     String v = String((uint32_t)time(nullptr)) + "|" + String(from ? from : "") + "|" + String(to ? to : "");
-    if (p.putString(key, v) > 0) p.putInt("__n", n + 1);
+    if (p.putString(key, v) > 0) {
+        p.putInt("__n", n + 1);
+    } else {
+        // Write failed — almost always a FULL partition. The wrap counter only advances on
+        // successful writes, so a full NVS would otherwise stay full forever (and take the
+        // settings namespace down with it). Reclaim our space and retry once.
+        p.clear(); p.putUChar("__v", ROUTE_FMT_VER);
+        if (p.putString(key, v) > 0) p.putInt("__n", 1);
+    }
     p.end();
 }
 
