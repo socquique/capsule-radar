@@ -319,6 +319,18 @@ void ui_set_netinfo(const char *line) {
     if (s_statsNet && line) lv_label_set_text(s_statsNet, line);
 }
 
+// Which provider served the last aircraft data. Shown on the Stats view so users can tell
+// whether they are on airplanes.live (feeder households) or a fallback — until now that
+// was only visible on the serial log, and it kept coming up in support threads.
+static char s_feedHost[40] = "-";
+void ui_set_feed_source(const char *host) {
+    if (!host || !host[0] || host[0] == '?') { snprintf(s_feedHost, sizeof(s_feedHost), "-"); return; }
+    // strip the machine prefixes so the label reads like the project name users know
+    if      (strncmp(host, "api.",      4) == 0) host += 4;
+    else if (strncmp(host, "opendata.", 9) == 0) host += 9;
+    snprintf(s_feedHost, sizeof(s_feedHost), "%s", host);
+}
+
 // GPS indicator. state: 0 = off / no module (hidden), 1 = acquiring (amber), 2 = fix (green).
 void ui_set_gps(int state, int sats, float altM) {
     if (state <= 0) {                                 // hidden when GPS auto-location is off
@@ -386,16 +398,17 @@ static void build_stats(void) {
     }
     char altH[16];
     fmt_alt(altH, sizeof(altH), (highest > -1e8f) ? highest : 0.0f, false);
-    char st[220];
+    char st[260];
     snprintf(st, sizeof(st),
              "Aircraft   %d\n"
              "Emergency  %d\n"
              "Nearest    %s\n"
              "           %.1f %s\n"
              "Highest    %s\n"
-             "Range      %.0f %s",
+             "Range      %.0f %s\n"
+             "Feed       %s",
              n, emg, n ? nearestCall : "-", dist_val(n ? nearest : 0.0f), dist_unit(),
-             altH, dist_val(s_rangeKm), dist_unit());
+             altH, dist_val(s_rangeKm), dist_unit(), s_feedHost);
     lv_label_set_text(s_statsLbl, st);
 }
 

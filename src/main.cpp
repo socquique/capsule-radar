@@ -1207,6 +1207,7 @@ void loop() {
         else
             snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
         ui_set_netinfo(net);
+        ui_set_feed_source(g_adsb.lastHost());   // Stats "Feed" line: who served the last data
         const bool bpresent = battery_present();
         ui_set_battery(battery_percent(), battery_charging(), bpresent);
         g_onBattery = bpresent && !battery_charging();

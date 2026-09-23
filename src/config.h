@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.4.3"   // shown on the web config page + Stats screen; bump on release
+#define FW_VERSION "1.4.4"   // shown on the web config page + Stats screen; bump on release
 
 // ---------- Home location (default: Dénia, Spain) ----------
 // Overridable at runtime via the captive portal (stored in NVS).
