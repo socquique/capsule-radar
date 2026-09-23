@@ -29,6 +29,14 @@
 #define GPS_BUF         4160       // fixed Wire RX buffer (>= GPS_READ_MAX); set once, never resized
 #define GPS_POLL_MS     2000       // continuous drain cadence, fix or no fix — same blocking
                                    //   hitch users already had pre-fix, now just permanent
+// The drain runs on the SAME core that serves the config web page, and a module that is
+// absent, antenna-less or wedged makes every drain walk its slowest path (I2C timeouts,
+// retries) — several BLOCKED seconds out of every two, which reads as "the web page will
+// not save while GPS is on" (field report, v1.4.3). So: after a few drains in a row where
+// the module never even answers, back off hard until one works. A healthy module keeps the
+// full 2 s cadence and the #24 overflow fix intact.
+#define GPS_POLL_DEAD_MS      30000   // cadence while the module is not answering at all
+#define GPS_DEAD_TO_BACKOFF   3       // consecutive dead drains before backing off
 #define GPS_FIX_TTL_MS  70000      // how long a fix stays "valid" without fresh sentences
 #define GPS_I2C_HZ      100000     // the read protocol is unreliable at the 400 kHz bus default
 #define GPS_BUS_HZ      400000     // restore the shared bus to this after each GPS transaction
@@ -40,32 +48,54 @@ static const uint8_t QLEN[8] = { 0x08, 0x00, 0x51, 0xAA, 0x04, 0x00, 0x00, 0x00 
 static bool        s_present = false;
 static TinyGPSPlus s_gps;
 
-// One blocking, uninterrupted drain of up to GPS_READ_MAX bytes into the parser.
-// Returns bytes read (0 if nothing queued or a step failed). Caller has set 100 kHz + long timeout.
-static int gps_drain() {
-    // 0) un-stick the module: other shared-bus traffic (LVGL polls the touch IC continuously
-    //    between our calls) can leave the LC76G mid-response and unable to answer at 0x50; a
-    //    stray 1-byte read at 0x54/0x58 kicks it back to normal (Quectel quirk). 1-byte reads,
-    //    no extra RAM.
+// Un-stick the module: other shared-bus traffic (LVGL polls the touch IC continuously
+// between our calls) can leave the LC76G mid-response and unable to answer at 0x50; a
+// stray 1-byte read at 0x54/0x58 kicks it back to normal (Quectel quirk). 1-byte reads,
+// no extra RAM. Costs up to two I2C timeouts against a dead module, so callers only run
+// it when the quick path has actually failed.
+static void gps_unstick() {
     Wire.requestFrom((uint8_t)GPS_ADDR_R, (uint8_t)1); while (Wire.available()) Wire.read();
     Wire.requestFrom((uint8_t)0x58,        (uint8_t)1); while (Wire.available()) Wire.read();
+}
 
-    // 1) query how many bytes are queued — retry, since prior shared-bus traffic can briefly
-    //    leave the module unable to answer the first attempt.
-    uint32_t avail = 0;
-    for (int t = 0; t < 6; ++t) {
+// Ask how many bytes are queued. Retries, since prior shared-bus traffic can briefly
+// leave the module unable to answer the first attempt. Returns true when the module
+// answered (avail may legitimately be 0), false when it never did.
+static bool gps_query_len(uint32_t *avail, int tries) {
+    for (int t = 0; t < tries; ++t) {
         Wire.beginTransmission(GPS_ADDR_W); Wire.write(QLEN, sizeof(QLEN));
         if (Wire.endTransmission() != 0) { delay(15); continue; }
         delay(GPS_SETTLE_MS);
         if (Wire.requestFrom((uint8_t)GPS_ADDR_R, (uint8_t)4) == 4) {
-            avail  = (uint32_t)Wire.read();
-            avail |= (uint32_t)Wire.read() << 8;
-            avail |= (uint32_t)Wire.read() << 16;
-            avail |= (uint32_t)Wire.read() << 24;
-            break;
+            uint32_t a  = (uint32_t)Wire.read();
+            a |= (uint32_t)Wire.read() << 8;
+            a |= (uint32_t)Wire.read() << 16;
+            a |= (uint32_t)Wire.read() << 24;
+            *avail = a;
+            return true;
         }
         delay(15);
     }
+    return false;
+}
+
+// One blocking, uninterrupted drain of up to GPS_READ_MAX bytes into the parser.
+// Returns bytes read, 0 when the module answered but had nothing usable queued, or -1
+// when it never answered (caller escalates toward the dead-module backoff). Caller has
+// set 100 kHz + long timeout. `recovering` = the previous drain got no answer: lead with
+// the un-stick reads and be more patient; the healthy path skips them and only falls
+// back to them if the quick length query fails.
+static int gps_drain(bool recovering) {
+    uint32_t avail = 0;
+    bool answered = false;
+    if (recovering) {
+        gps_unstick();
+        answered = gps_query_len(&avail, 6);
+    } else {
+        answered = gps_query_len(&avail, 3);
+        if (!answered) { gps_unstick(); answered = gps_query_len(&avail, 3); }
+    }
+    if (!answered) return -1;
     if (avail == 0 || avail > 200000) return 0;       // nothing queued / garbage length
 
     // 2) ask for at most one bufferful; the command echoes the count we will read.
@@ -100,15 +130,21 @@ bool gps_present() { return s_present; }
 void gps_poll() {
     if (!s_present) return;
     static uint32_t last = 0;
+    static uint8_t  deadDrains = 0;   // consecutive drains where the module never answered
     const uint32_t now = millis();
     // Same cadence with or without a fix: the module never stops emitting NMEA, so WE must
     // never stop draining it, or its queue overflows and it wedges until power-cycled (#24).
-    if (last != 0 && now - last < GPS_POLL_MS) return;
+    // Exception: a module that is not answering AT ALL has nothing to overflow — hammering
+    // it just blocks this core (and the config web page) on I2C timeouts, so back off.
+    const uint32_t interval = (deadDrains >= GPS_DEAD_TO_BACKOFF) ? GPS_POLL_DEAD_MS : GPS_POLL_MS;
+    if (last != 0 && now - last < interval) return;
     last = now;
 
     Wire.setClock(GPS_I2C_HZ); Wire.setTimeOut(GPS_TIMEOUT_MS);   // LC76G read path: 100 kHz + tolerate clock-stretch
-    gps_drain();
+    const int got = gps_drain(deadDrains > 0);
     Wire.setTimeOut(BUS_TIMEOUT_MS); Wire.setClock(GPS_BUS_HZ);   // hand the shared bus back to touch/IMU/RTC/PMIC
+    if (got < 0) { if (deadDrains < 255) ++deadDrains; }
+    else deadDrains = 0;
 
     // Diagnostic ladder (every ~8 s): chars=0 -> no NMEA arriving; sent>0 but fix=0 -> valid
     // data, just no satellite lock yet (needs clear sky / a few min on a cold start).
