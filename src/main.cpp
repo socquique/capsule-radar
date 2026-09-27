@@ -497,10 +497,12 @@ static void handleRoot() {
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
                   "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
     }
-    static const size_t BUFSZ = 10240;
+    // 16 KB: the page outgrew 10 KB (~10.3 KB with the GPS row), and snprintf silently cut
+    // off the closing </script>, so none of the live-setting handlers existed in the browser.
+    static const size_t BUFSZ = 16384;
     static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM: keep this big page buffer off the scarce
     if (!buf) return;                              //   internal heap (the contiguous RAM mbedTLS needs)
-    snprintf(buf, BUFSZ,
+    const int len = snprintf(buf, BUFSZ,
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>Capsule Radar</title>"
@@ -612,6 +614,8 @@ static void handleRoot() {
         tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
+    if (len >= (int)BUFSZ)   // truncated page = broken <script>; make it loud, not silent
+        Serial.printf("[web] config page truncated: %d bytes > %u buffer\n", len, (unsigned)BUFSZ);
     g_web.send(200, "text/html", buf);
 }
 
