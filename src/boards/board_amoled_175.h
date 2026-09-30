@@ -40,6 +40,15 @@
 #define I2C_ADDR_RTC        0x51
 #define I2C_ADDR_PMIC       0x34
 
+// ---------- TCA9554 I/O expander (GNSS reset) ----------
+// From the Waveshare schematic: the LC76G's RESET pin (-G variant) is wired to EXIO7 of a
+// TCA9554 at 0x20 (A0-A2 tied to GND). The other EXIO pins are INPUTS carrying RTC_INT (P3),
+// SYS_OUT (P4), AXP_IRQ (P5) and QMI_INT1 (P6), so only ever touch P7. The LC76G's VCC is the
+// main 3V3 rail (not switchable), so this reset line is the only way to restart it without
+// cutting power to the whole board.
+#define I2C_ADDR_EXPANDER   0x20
+#define EXPANDER_GPS_RST_BIT 7             // EXIO7 -> LC76G RESET (active low)
+
 // ---------- ES8311 codec over I2S (M4 alert ping) ----------
 #define PIN_I2S_MCLK        42
 #define PIN_I2S_BCLK        9
