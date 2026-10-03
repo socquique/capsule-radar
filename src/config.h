@@ -57,6 +57,7 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 // valid contact info, a provider should be able to tell which build is talking to them.
 #define ADSB_USER_AGENT     "CapsuleRadar/" FW_VERSION " (ESP32-S3 hobby; +https://github.com/socquique/capsule-radar)"
 #define ADSB_HTTPS_INSECURE 1               // 1 = setInsecure() (hobby). 0 = use pinned root CA.
+#define TLS_HANDSHAKE_S     10              // TLS handshake timeout for every HTTPS client, seconds (core default is 120)
 #define ADSB_MAX_AIRCRAFT   60              // hard cap parsed per poll (protect RAM in busy areas)
 // How long to stop asking a provider that refused us. 403 is a policy refusal (needs
 // approval, or a User-Agent they reject) and will not clear in seconds; 429 just means

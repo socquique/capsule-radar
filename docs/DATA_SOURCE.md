@@ -79,6 +79,10 @@ left the device. Both refresh the watchdog via `AdsbClient::lastResponseMs()` â€
 feed every provider refuses reboots the device every three minutes, and each boot asks all
 three of them again.
 
+Every HTTPS client sets `setHandshakeTimeout(TLS_HANDSHAKE_S)` (10 s). The core default is 120 s,
+so a server that accepts TCP but never finishes the handshake would hold the network task for two
+minutes, and two such hangs in a row outlast the 180 s watchdog with nothing wrong on the device.
+
 Set the `User-Agent` with `HTTPClient::setUserAgent()`. **`addHeader("User-Agent", ...)` is
 silently ignored** â€” Arduino keeps that header on an internal "handled by code" list, so the
 request goes out as the default `ESP32HTTPClient` and providers refuse it.
