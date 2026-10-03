@@ -38,6 +38,18 @@
 #include <esp_heap_caps.h>          // largest-free-block metric (heap health)
 #include <esp_wifi.h>               // WiFi driver control (reset must survive the reboot)
 #include <nvs.h>                    // erase the driver's "nvs.net80211" namespace (WiFi reset)
+#include <mbedtls/platform.h>       // route mbedTLS allocations to PSRAM
+
+// mbedTLS allocates from internal RAM by default (the prebuilt core has
+// CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC). Its ~16 KB record buffers, allocated and freed on
+// every HTTPS fetch, fragment the internal heap until a handshake can't find a
+// contiguous block (-32512) and the feed freezes. Put them in PSRAM instead, the same
+// as ESP-IDF's CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC; fall back to internal RAM if needed.
+static void *tls_calloc(size_t n, size_t size) {
+    return heap_caps_calloc_prefer(n, size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+static void tls_free(void *p) { heap_caps_free(p); }
 
 // ---- shared state ----
 static std::vector<Aircraft> g_aircraft;      // latest snapshot
@@ -963,6 +975,7 @@ void setup() {
         Serial.println("[!] Pins in config.h are still -1. Copy them from the Waveshare demo.");
     }
     Serial.printf("PSRAM: %u bytes free\n", (unsigned)ESP.getFreePsram());
+    mbedtls_platform_set_calloc_free(tls_calloc, tls_free);   // before any TLS use
 
     loadSettings();
     route_cache_begin();   // clear stale route cache if the label format changed
