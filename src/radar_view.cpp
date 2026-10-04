@@ -51,12 +51,7 @@
 #define ORB_BG_BOT lv_color_hex(0x09250A)
 #define ORB_FLOW   lv_color_hex(0xFFC24D)
 
-// ---- sweep config ----
-#define SWEEP_PERIOD_MS   8000
-#define SWEEP_FRAME_MS    30
-#define SWEEP_TRAIL_DEG   38.0f
-#define SWEEP_TRAIL_STEPS 20
-#define SWEEP_TRAIL_OPA   72
+// ---- sweep config: SWEEP_* live in config.h (shared with the compositor in display.cpp) ----
 
 // ---- aircraft / flow / orb config ----
 #define TRAIL_MAX         7
@@ -93,6 +88,11 @@ static int        s_flowMax         = FLOW_MAX;    // persistent flow-layer segm
 static int        s_flowGenMax      = 14;          // ...and an age cap in polls (~2 s each) so tracks fade out
 static lv_timer_t *s_timer    = nullptr;
 static float       s_sweepDeg = 0.0f;
+// Sweep compositor hooks (device only; main.cpp sets them when display.cpp can draw the
+// sweep per pixel). Unset, e.g. in the SDL simulator, LVGL draws the sweep as before.
+static void (*s_compConfig)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse) = nullptr;
+static void (*s_compTick)() = nullptr;
+static inline void comp_tick() { if (s_compTick) s_compTick(); }   // cheap unless a sweep tick is due
 static float       s_prevSweepDeg = 0.0f;
 static float       s_wavePhase = 0.0f;
 static uint32_t    s_lastUpdateMs = 0;       // smooth-motion: cadence + animation clock
@@ -168,6 +168,8 @@ static inline lv_point_t rot_pt(float px, float py, float deg, lv_coord_t ox, lv
 // =============================== flow map ====================================
 static void flow_draw_seg(const FlowSeg &s) {
     if (!s_flowCanvas) return;
+    static uint32_t n = 0;
+    if ((++n & 31) == 0) comp_tick();            // keep the sweep moving through a full redraw
     lv_draw_line_dsc_t d;
     lv_draw_line_dsc_init(&d);
     d.color = orb() ? ORB_FLOW : s_cRing;
@@ -247,7 +249,7 @@ static void grid_draw_cb(lv_event_t *e) {
 
 // =============================== sweep =======================================
 static void sweep_draw_cb(lv_event_t *e) {
-    if (orb()) return;
+    if (orb() || s_compConfig) return;           // the compositor draws it
     lv_draw_ctx_t *dctx = lv_event_get_draw_ctx(e);
     const lv_point_t center = { s_cx, s_cy };
     const float R = (float)RADAR_R_OUTER_PX;
@@ -270,7 +272,7 @@ static void sweep_draw_cb(lv_event_t *e) {
     lv_draw_line_dsc_init(&le);
     le.color = s_cLead;
     le.width = 2;
-    le.opa = 217;
+    le.opa = SWEEP_LEAD_OPA;
     le.round_start = 1;
     le.round_end = 1;
     lv_point_t lead = rim_point(s_sweepDeg, R);
@@ -352,7 +354,7 @@ static void sweep_timer_cb(lv_timer_t *t) {
     s_prevSweepDeg = s_sweepDeg;
     s_sweepDeg += 360.0f * (float)SWEEP_FRAME_MS / (float)SWEEP_PERIOD_MS;
     if (s_sweepDeg >= 360.0f) s_sweepDeg -= 360.0f;
-    if (!s_sweep) return;
+    if (!s_sweep || s_compConfig) return;   // compositor: no LVGL repaint per tick
     lv_area_t a, b, area;
     wedge_bbox(s_prevSweepDeg, &a);
     wedge_bbox(s_sweepDeg, &b);
@@ -539,13 +541,16 @@ static lv_obj_t *make_layer(lv_obj_t *parent, lv_event_cb_t draw_cb) {
 
 static void pulse_anim_cb(void *obj, int32_t v) {
     lv_obj_t *o = (lv_obj_t *)obj;
-    const lv_coord_t dia = 10 + (lv_coord_t)((v * 44) / 100);
+    if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) return;   // the compositor draws it
+    const lv_coord_t dia = PULSE_D_MIN + (lv_coord_t)((v * (PULSE_D_MAX - PULSE_D_MIN)) / 100);
     lv_obj_set_size(o, dia, dia);
     lv_obj_center(o);
-    lv_obj_set_style_border_opa(o, (lv_opa_t)(220 - v * 220 / 100), 0);
+    lv_obj_set_style_border_opa(o, (lv_opa_t)(PULSE_OPA - v * PULSE_OPA / 100), 0);
 }
 
 namespace radar {
+
+static void sweep_sync();
 
 void setTheme(int t) {
     s_theme = ((t % THEME_COUNT) + THEME_COUNT) % THEME_COUNT;
@@ -576,7 +581,6 @@ void setTheme(int t) {
     for (int i = 0; i < 4; ++i) show(s_rose[i], !drg);   // hide compass in Orb
     show(s_rangeLbl, !drg && s_rangeLblVisible);
     show(s_centerDot, !drg);                             // orb draws an orange triangle instead
-    show(s_pulse, !drg);
 
     // retint the persistent chrome objects for the active palette
     if (s_rose[0]) lv_obj_set_style_text_color(s_rose[0], s_cInk, 0);
@@ -586,6 +590,7 @@ void setTheme(int t) {
     if (s_rangeLbl)  lv_obj_set_style_text_color(s_rangeLbl, s_cRing, 0);
 
     flow_redraw_all();
+    sweep_sync();
     if (s_parent) lv_obj_invalidate(s_parent);
     if (s_themeCb) s_themeCb(s_theme);
 }
@@ -595,12 +600,28 @@ void cycleTheme() { setTheme(s_theme + 1); }
 void setThemeChangedCb(void (*cb)(int)) { s_themeCb = cb; }
 void setRangeLabelVisible(bool v) { s_rangeLblVisible = v; if (s_rangeLbl) show(s_rangeLbl, v && !orb()); }
 
+// Show the LVGL sweep and centre ripple, or hand colours + on/off to the compositor when
+// it owns them.
+static void sweep_sync() {
+    if (s_compConfig)
+        s_compConfig(lv_color_to16(s_cRing), lv_color_to16(s_cLead), lv_color_to16(s_cInk),
+                     s_sweepEnabled && !orb(), !orb());
+    if (s_sweep) {
+        show(s_sweep, s_sweepEnabled && !s_compConfig);
+        lv_obj_invalidate(s_sweep);            // clear any LVGL wedge currently painted
+    }
+    if (s_pulse) show(s_pulse, !orb() && !s_compConfig);   // orb draws an orange triangle instead
+}
+
 void setSweepEnabled(bool on) {
     s_sweepEnabled = on;
-    if (s_sweep) {
-        show(s_sweep, on);
-        if (!on) lv_obj_invalidate(s_sweep);   // clear any wedge currently painted
-    }
+    sweep_sync();
+}
+
+void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse), void (*tick)()) {
+    s_compConfig = config;
+    s_compTick = tick;
+    sweep_sync();
 }
 bool sweepEnabled() { return s_sweepEnabled; }
 
@@ -685,14 +706,14 @@ void init(void *lv_parent) {
     lv_obj_set_style_radius(s_pulse, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(s_pulse, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_color(s_pulse, COL_INK, 0);
-    lv_obj_set_style_border_width(s_pulse, 2, 0);
+    lv_obj_set_style_border_width(s_pulse, PULSE_W, 0);
     lv_obj_clear_flag(s_pulse, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_pulse);
     lv_anim_set_exec_cb(&a, pulse_anim_cb);
     lv_anim_set_values(&a, 0, 100);
-    lv_anim_set_time(&a, 2600);
+    lv_anim_set_time(&a, PULSE_PERIOD_MS);
     lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
     lv_anim_start(&a);
 
@@ -740,7 +761,9 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     std::map<std::string, lv_point_t> prevPos;        // smooth-motion: glide starts here
     for (const AcDraw &a : s_acs) prevPos[a.hex] = a.pos;
 
+    comp_tick();
     for (const Aircraft &ac : aircraft) {
+        comp_tick();
         const double distKm = geo::haversineKm(s.homeLat, s.homeLon, ac.lat, ac.lon);
         const double brg = geo::bearingDeg(s.homeLat, s.homeLon, ac.lat, ac.lon);
         const geo::Point p = geo::projectToScreen(distKm, brg, s.rangeKm, s_cx, s_cy, R, s.rotationDeg);

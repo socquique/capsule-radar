@@ -569,6 +569,25 @@ void ui_set_weather_forecast(bool forecast) {
 static void (*s_viewChangedCb)(int) = nullptr;
 void ui_set_view_changed_cb(void (*cb)(int idx)) { s_viewChangedCb = cb; }
 
+// Sweep compositor hooks (polled by display.cpp every loop pass).
+bool ui_sweep_visible(void) {
+    return s_tv && lv_tileview_get_tile_act(s_tv) == s_tileRadar && !lv_obj_is_scrolling(s_tv);
+}
+
+int ui_sweep_masks(int16_t out[][5], int max) {
+    lv_obj_t *objs[4] = { s_card, s_photo, s_photoCredit, s_zoomBtn };   // detail card, its photo, range button
+    int n = 0;
+    for (lv_obj_t *o : objs) {
+        if (n >= max || !o || lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) continue;
+        lv_area_t a;
+        lv_obj_get_coords(o, &a);
+        out[n][0] = a.x1; out[n][1] = a.y1; out[n][2] = a.x2; out[n][3] = a.y2;
+        out[n][4] = lv_obj_get_style_radius(o, LV_PART_MAIN);
+        n++;
+    }
+    return n;
+}
+
 static int active_view_index(void) {
     if (!s_tv) return 0;
     lv_obj_t *act = lv_tileview_get_tile_act(s_tv);
