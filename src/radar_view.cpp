@@ -826,6 +826,7 @@ void setTheme(int t) {
 int  theme() { return s_theme; }
 void cycleTheme() { setTheme(s_theme + 1); }
 void setThemeChangedCb(void (*cb)(int)) { s_themeCb = cb; }
+uint32_t accentRgb() { return lv_color_to32(s_cRing) & 0xFFFFFF; }
 void setRangeLabelVisible(bool v) { s_rangeLblVisible = v; if (s_rangeLbl) show(s_rangeLbl, v && !orb() && s_clockStage == 0); }
 
 // Show the LVGL sweep and centre ripple, or hand colours + on/off to the compositor when

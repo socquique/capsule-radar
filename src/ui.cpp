@@ -351,6 +351,15 @@ void ui_frame_done(void) {
     s_rangeShownMs = lv_tick_get();
 }
 
+// The range button sits on the scope, so it follows the theme's ring colour like the
+// scope's own range label (the rest of the UI chrome stays UI_GREEN).
+void ui_apply_theme(void) {
+    if (!s_zoomBtn || !s_zoomLbl) return;
+    const lv_color_t c = lv_color_hex(radar::accentRgb());
+    lv_obj_set_style_border_color(s_zoomBtn, c, 0);
+    lv_obj_set_style_text_color(s_zoomLbl, c, 0);
+}
+
 static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cancel on the tileview)
     (void)e;
     static uint32_t last = 0;

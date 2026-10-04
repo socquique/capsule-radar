@@ -216,6 +216,8 @@ int main(int argc, char **argv) {
 
     ui_create();
     ui_set_range_cb(sim_range_cb);   // on-screen zoom button
+    radar::setThemeChangedCb([](int) { ui_apply_theme(); });
+    ui_apply_theme();
     ui_set_range_km(RANGE_KM_DEFAULT);
     ui_set_poweroff_cb([]() {});   // mock: represent a PMIC-fitted board (shows the Stats power-off button)
     mock_init();
