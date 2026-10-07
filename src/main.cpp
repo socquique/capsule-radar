@@ -31,6 +31,7 @@
 #include <WiFiManager.h>             // captive portal
 #include <Preferences.h>            // NVS (persist theme/settings)
 #include <time.h>                   // NTP/RTC clock + date
+#include <esp_sntp.h>               // SNTP sync callback: a REAL NTP fix (not just a plausible epoch)
 #include <WebServer.h>              // configuration web page
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
@@ -80,7 +81,7 @@ static int                   g_trailLen = 2;                         // aircraft
 static int                   g_maxAc = 20;                           // max aircraft drawn on the scope (web/NVS)
 static bool                  g_bigText = false;                      // accessibility: large fonts (web/NVS, applied at boot)
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
-static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
+static volatile bool         g_rtcSyncPending = false;               // SNTP synced: RTC should be rewritten on core 1
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
 static volatile bool         g_requery = false;                      // range changed -> adsb_task re-begins
 static float                 g_requeryKm = 0.0f;
@@ -371,7 +372,7 @@ static void saveTheme(int t) {
 static time_t utc_to_time(struct tm *utc) {
     setenv("TZ", "UTC0", 1); tzset();
     const time_t t = mktime(utc);
-    setenv("TZ", TZ_STR, 1); tzset();   // restore local TZ for getLocalTime()
+    setenv("TZ", g_tz.c_str(), 1); tzset();   // restore the SAVED zone, not the Spain default
     return t;
 }
 
@@ -1041,9 +1042,15 @@ void setup() {
     gps_set_idle_hook(display::sweepTick);   // keep the sweep moving during GPS reads (it never touches I2C)
     battery_enable_codec_rail();   // power the ES8311 analog rail before audio init
 
-    setenv("TZ", TZ_STR, 1); tzset();   // local time for display even before NTP
+    setenv("TZ", g_tz.c_str(), 1); tzset();   // SAVED zone (not the Spain default): right clock before NTP
     rtc_begin();
     rtc_seed_clock();                   // offline clock/date from the PCF85063
+    // The system clock may be RTC-seeded (looks valid, might drift). Only a real SNTP
+    // sync may write the RTC back — the callback flags each sync, the 5 s tick (core 1)
+    // does the I2C write, at most hourly.
+    sntp_set_time_sync_notification_cb([](struct timeval *tv) {
+        g_rtcSyncPending = true;   // SNTP task context: flag only, no I2C here
+    });
     if (audio_begin()) {                // ES8311 alert pings (no-op if codec absent)
         audio_set_volume(g_volume);
         audio_set_muted(g_muted);
@@ -1124,6 +1131,8 @@ void setup() {
         },
         handleUpdateUpload);
     g_web.begin();
+
+    applyBrightness();   // display::begin() opens at BRIGHTNESS_DEFAULT; honour the saved value
 
     Serial.println("setup done");
 }
@@ -1230,16 +1239,27 @@ void loop() {
         ui_set_feed_source(g_adsb.lastHost());   // Stats "Feed" line: who served the last data
         const bool bpresent = battery_present();
         ui_set_battery(battery_percent(), battery_charging(), bpresent);
-        g_onBattery = bpresent && !battery_charging();
+        // "On battery" must mean USB is absent, not "not charging": isCharging() goes
+        // false once the battery is FULL, which used to slow polling to 5 s on a
+        // USB-tethered, fully charged device.
+        g_onBattery = bpresent && !battery_vbus_in();
         // GPS HUD/Stats: 0 = off/no module (hidden), 1 = acquiring, 2 = fix
         const int gpsState = (!g_useGps || !gps_present()) ? 0 : (gps_has_fix() ? 2 : 1);
         ui_set_gps(gpsState, gps_satellites(), gps_altitude_m());
-        // once NTP has a real fix, persist it to the RTC (core 1 only)
-        if (!g_rtcSynced && time(nullptr) > 1700000000L) {
+        // Write the RTC only after a REAL SNTP sync (flagged by the callback in setup),
+        // and at most hourly — the boot clock is RTC-seeded and looks valid too, which
+        // used to let the 5 s tick write drift right back over a good time source.
+        static uint32_t lastRtcWriteMs = 0;
+        if (g_rtcSyncPending &&
+            (lastRtcWriteMs == 0 || millis() - lastRtcWriteMs >= 3600000UL)) {
             time_t now = time(nullptr);
             struct tm utc;
             gmtime_r(&now, &utc);
-            if (rtc_write(&utc)) { g_rtcSynced = true; Serial.println("[rtc] saved NTP time"); }
+            if (now > 1700000000L && rtc_write(&utc)) {   // sanity: a synced clock is past 2023
+                g_rtcSyncPending = false;                 // cleared only on success: retry on I2C error
+                lastRtcWriteMs = millis();
+                Serial.println("[rtc] saved NTP time");
+            }
         }
         // GPS auto-location (-G variant): re-centre the radar when the fix moves enough.
         if (g_useGps) {

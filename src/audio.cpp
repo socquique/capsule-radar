@@ -28,8 +28,11 @@ static int16_t *s_buf = nullptr;     // tone scratch in PSRAM (keeps internal RA
 static const size_t S_BUF_LEN = SR / 2 * 2;   // up to 500 ms, stereo interleaved
 static volatile int  s_vol = 60;     // 0..100
 static volatile bool s_muted = false;
-static volatile int  s_cue = -1;
-static SemaphoreHandle_t s_sem = nullptr;
+// Cue queue (not one shared slot + semaphore): with a single slot, an AUDIO_ALERT could
+// be overwritten by an AUDIO_NEW queued in the same poll, and the urgent ping never
+// played. A full queue (four cues; a burst of web "Test ping" presses fills it) drops a
+// new ping, but an alert jumps the queue and displaces the cue due next (audio_play).
+static QueueHandle_t s_queue = nullptr;
 
 static void es_write(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(ES8311_ADDR);
@@ -182,8 +185,9 @@ static void play_cue(int cue) {
 }
 
 static void audio_task(void *) {
+    int cue;
     for (;;) {
-        if (xSemaphoreTake(s_sem, portMAX_DELAY) == pdTRUE) play_cue(s_cue);
+        if (xQueueReceive(s_queue, &cue, portMAX_DELAY) == pdTRUE) play_cue(cue);
     }
 }
 
@@ -215,7 +219,12 @@ bool audio_begin() {
         s_ok = false;
         return false;
     }
-    s_sem = xSemaphoreCreateBinary();
+    s_queue = xQueueCreate(4, sizeof(int));
+    if (!s_queue) {
+        Serial.println("[audio] cue queue alloc failed");
+        s_ok = false;
+        return false;
+    }
     xTaskCreatePinnedToCore(audio_task, "audio", 4096, nullptr, 1, nullptr, 0);  // I2S only -> core 0
     s_ok = true;
     Serial.println("[audio] ES8311 ready");
@@ -227,15 +236,22 @@ void audio_set_volume(int pct) { s_vol = constrain(pct, 0, 100); }
 void audio_set_muted(bool m) { s_muted = m; }
 
 void audio_play(AudioCue cue) {
-    if (!s_ok || s_muted) return;
-    s_cue = (int)cue;
-    if (s_sem) xSemaphoreGive(s_sem);
+    if (!s_ok || s_muted || !s_queue) return;
+    const int c = (int)cue;
+    // Never blocks the LVGL loop.
+    if (cue != AUDIO_ALERT) { xQueueSend(s_queue, &c, 0); return; }   // full: drop the ping
+    if (xQueueSendToFront(s_queue, &c, 0) == pdTRUE) return;
+    // Full: the alert takes the place of the cue due next. Every producer runs on this
+    // (loop) task and the audio task only ever empties the queue, so the slot stays free.
+    int displaced;
+    xQueueReceive(s_queue, &displaced, 0);
+    xQueueSendToFront(s_queue, &c, 0);
 }
 
 void audio_selftest() {   // ~2 s continuous tone, ignores mute, PA held on
-    if (!s_ok) return;
-    s_cue = 2;
-    if (s_sem) xSemaphoreGive(s_sem);
+    if (!s_ok || !s_queue) return;
+    const int c = 2;
+    xQueueSend(s_queue, &c, 0);
 }
 
 #else   // !BOARD_HAS_AUDIO
