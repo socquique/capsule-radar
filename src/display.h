@@ -26,6 +26,14 @@ uint32_t inactiveMs();
 void setRotation(uint16_t degrees);
 uint16_t rotation();
 
+// Sweep compositor: draws the radar sweep (and the centre ripple) per pixel over the last
+// pushed frame, so LVGL no longer repaints the whole layer stack under them on every tick.
+// radar_view hands over colours + on/off (main.cpp wires it); the UI is polled for
+// visibility and the objects the sweep must not cover.
+bool sweepAvailable();          // buffers allocated: the compositor can own the sweep
+void sweepConfig(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse);
+void sweepTick();               // advance the sweep if a tick is due; no LVGL, no I2C (safe inside the GPS drain)
+
 } // namespace display
 
 uint32_t display_frames();   // total rendered frames (for FPS measurement)

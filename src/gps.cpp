@@ -205,6 +205,18 @@ static void gps_unstick() {
     Wire.requestFrom((uint8_t)0x58,        (uint8_t)1); while (Wire.available()) Wire.read();
 }
 
+// Waits inside the read path. The LC76G needs the I2C bus to itself for the whole drain
+// (other bus traffic between steps makes it stop answering), so during these waits only
+// the idle hook runs: the display's sweep compositor, which uses QSPI and never touches
+// I2C. Without a hook this is a plain delay(), as before.
+static void (*s_idleHook)() = nullptr;
+void gps_set_idle_hook(void (*hook)()) { s_idleHook = hook; }
+static void gps_settle(uint32_t ms) {
+    if (!s_idleHook) { delay(ms); return; }
+    const uint32_t t0 = millis();
+    while (millis() - t0 < ms) { s_idleHook(); delay(1); }
+}
+
 // Ask how many bytes are queued. Retries, since prior shared-bus traffic can briefly
 // leave the module unable to answer the first attempt. Returns true when the module
 // answered (avail may legitimately be 0), false when it never did.
@@ -212,7 +224,7 @@ static bool gps_query_len(uint32_t *avail, int tries) {
     for (int t = 0; t < tries; ++t) {
         Wire.beginTransmission(GPS_ADDR_W); Wire.write(QLEN, sizeof(QLEN));
         if (Wire.endTransmission() != 0) { delay(15); continue; }
-        delay(GPS_SETTLE_MS);
+        gps_settle(GPS_SETTLE_MS);
         if (Wire.requestFrom((uint8_t)GPS_ADDR_R, (uint8_t)4) == 4) {
             uint32_t a  = (uint32_t)Wire.read();
             a |= (uint32_t)Wire.read() << 8;
@@ -250,12 +262,12 @@ static int gps_drain(bool recovering) {
     const uint8_t cmd[8] = { 0x00, 0x20, 0x51, 0xAA,
                              (uint8_t)want, (uint8_t)(want >> 8),
                              (uint8_t)(want >> 16), (uint8_t)(want >> 24) };
-    delay(GPS_SETTLE_MS);                              // <-- without this gap the cmd write gets NACKed
+    gps_settle(GPS_SETTLE_MS);                         // <-- without this gap the cmd write gets NACKed
     Wire.beginTransmission(GPS_ADDR_W); Wire.write(cmd, sizeof(cmd));
     if (Wire.endTransmission() != 0) return 0;
 
     // 3) read straight into the NMEA parser (no Wire.setBufferSize here — see file header)
-    delay(GPS_SETTLE_MS);
+    gps_settle(GPS_SETTLE_MS);
     const int got = Wire.requestFrom((uint8_t)GPS_ADDR_R, (size_t)want);
     for (int i = 0; i < got; ++i) {
         const char c = (char)Wire.read();

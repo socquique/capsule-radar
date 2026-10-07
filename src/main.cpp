@@ -986,6 +986,8 @@ void setup() {
     // PMIC. Touch (CST9217 indev) + AXP2101 come in later milestones.
     if (!display::begin()) {
         Serial.println("[!] display::begin() failed — check QSPI pins / power.");
+    } else if (display::sweepAvailable()) {
+        radar::setSweepCompositor(display::sweepConfig, display::sweepTick);   // per-pixel sweep (display.cpp)
     }
 
     // restore the saved theme, then persist any future change
@@ -1036,6 +1038,7 @@ void setup() {
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
     battery_begin();   // AXP2101 (no-op if not detected / no battery)
     gps_begin();       // LC76G GNSS (no-op if not the -G variant)
+    gps_set_idle_hook(display::sweepTick);   // keep the sweep moving during GPS reads (it never touches I2C)
     battery_enable_codec_rail();   // power the ES8311 analog rail before audio init
 
     setenv("TZ", TZ_STR, 1); tzset();   // local time for display even before NTP
