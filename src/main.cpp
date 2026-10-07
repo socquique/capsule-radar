@@ -8,6 +8,7 @@
 #include "geo.h"
 #include "adsb_client.h"
 #include "snapshot_gate.h"
+#include "feed_watchdog.h"
 #include "route.h"
 #include "route_client.h"
 #include "photo.h"
@@ -128,7 +129,7 @@ static void adsb_task(void*) {
     uint32_t nextWeatherAt = UINT32_MAX;       // armed five seconds after WiFi connects
     uint32_t nextWxRadarAt = UINT32_MAX;
     uint32_t nextCloudImageAt = UINT32_MAX;
-    uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
+    FeedWatchdog watchdog(millis());         // self-heal: see feed_watchdog.h
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
@@ -144,19 +145,23 @@ static void adsb_task(void*) {
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
         }
         wasConnected = conn;
-        // self-heal: a long feed outage while WiFi is up usually means the internal heap
-        // fragmented and the TLS handshake can't allocate -> reboot to recover (settings persist).
-        // A provider that answers "403, not for you" is NOT that failure, and neither is a poll
-        // we deliberately paced: the stack is fine either way. Count any completed HTTP exchange
-        // as alive, or a feed that every provider refuses reboots the device every three
-        // minutes — and every boot asks all three of them again.
-        const uint32_t lastHttpMs = g_adsb.lastResponseMs();
-        if (lastHttpMs && (int32_t)(lastHttpMs - lastFeedOk) > 0) lastFeedOk = lastHttpMs;
-        if (!conn) lastFeedOk = millis();
-        else if (millis() - lastFeedOk > 180000UL) {
-            Serial.println("[adsb] feed stuck >180s with WiFi up -> restarting to recover");
-            delay(100);
-            ESP.restart();
+        // Self-heal: reboot only for a fragmented internal heap starving TLS, never for
+        // refusals or an internet outage behind working WiFi (see feed_watchdog.h).
+        if (const uint32_t answeredMs = g_adsb.lastResponseMs()) watchdog.onAnswer(answeredMs);
+        switch (watchdog.check(conn, millis(), [] {
+                    return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL); })) {
+            case FeedWatchdog::RESTART:
+                Serial.printf("[adsb] feed stuck >%us and internal heap fragmented -> restarting to recover\n",
+                              (unsigned)(ADSB_STUCK_MS / 1000));
+                delay(100);
+                ESP.restart();
+                break;
+            case FeedWatchdog::LOG_STUCK:
+                Serial.printf("[adsb] feed stuck >%us with WiFi up (no internet?); heap OK, staying up\n",
+                              (unsigned)(ADSB_STUCK_MS / 1000));
+                break;
+            case FeedWatchdog::NONE:
+                break;
         }
         if (g_requery) {                          // display range changed (double-tap zoom)
             g_adsb.begin(g_settings.homeLat, g_settings.homeLon, g_requeryKm);
@@ -179,7 +184,7 @@ static void adsb_task(void*) {
                     failCount = 0;
                     g_feedOk = true;
                     const uint32_t receivedMs = millis();
-                    lastFeedOk = receivedMs;
+                    watchdog.onPoll(FeedWatchdog::FETCHED, receivedMs);
                     g_lastFeedOkMs = receivedMs;      // HUD: mark data as fresh
 
                     const bool publish = snapshotGate.shouldPublish(
@@ -201,14 +206,17 @@ static void adsb_task(void*) {
                         }
                     }
                 } else if (g_adsb.lastPollSkipped()) {
-                    // Every provider is parked or inside its spacing window: we chose not to
-                    // ask. Logging this each tick would bury the real errors, and counting it
-                    // would show an outage warning for our own politeness. Prolonged silence
-                    // still trips the warning, via the time check rather than a fail count.
+                    // Every provider is parked or inside its spacing/silence window: we chose
+                    // not to ask. Logging this each tick would bury the real errors, and
+                    // counting it would show an outage warning for our own politeness.
+                    // Prolonged silence still trips the warning, via the time check rather
+                    // than a fail count. Not proof of life for the watchdog: nothing was sent.
+                    watchdog.onPoll(FeedWatchdog::SKIPPED, nowMs);
                     if ((int32_t)(nowMs - g_adsb.lastOkMs()) > (int32_t)ADSB_FEED_STALE_MS)
                         g_feedOk = false;
                 } else {
                     Serial.println("[adsb] poll failed");
+                    watchdog.onPoll(FeedWatchdog::FAILED, nowMs);
                     if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
                 }
             }

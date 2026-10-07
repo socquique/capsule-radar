@@ -84,6 +84,14 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
 #define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down
 #define ADSB_FEED_STALE_MS     60000UL      // no successful fetch for this long -> HUD warning
+// The feed-stuck watchdog (FeedWatchdog in feed_watchdog.h) calls the feed stuck when WiFi
+// is up and no provider has answered for ADSB_STUCK_MS. It may then reboot only when the
+// largest free INTERNAL heap block is below ADSB_STUCK_MIN_LARGEST_BLOCK: a TLS handshake
+// needs a contiguous block of roughly this size (photo_client.cpp skips a whole photo fetch
+// below the same figure). Above it, a stuck feed is an internet outage, not heap
+// fragmentation — stay up, warn amber.
+#define ADSB_STUCK_MS         180000UL
+#define ADSB_STUCK_MIN_LARGEST_BLOCK 28000
 
 // ---------- Debug ----------
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial

@@ -34,6 +34,7 @@ fi
 
 run snapshot_gate -Isrc tests/snapshot_gate_test.cpp
 run adsb_pacing -Isrc tests/adsb_pacing_test.cpp
+run feed_watchdog -Isrc tests/feed_watchdog_test.cpp
 
 if [ -d "$AJ" ]; then
     run adsb_json_stream -Itests/stubs -I"$AJ" \
