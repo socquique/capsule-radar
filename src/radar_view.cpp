@@ -205,8 +205,12 @@ static void flow_draw_seg(const FlowSeg &s) {
 }
 
 static void flow_redraw_all(void) {
-    if (!s_flowCanvas) return;
-    lv_canvas_fill_bg(s_flowCanvas, lv_color_black(), LV_OPA_TRANSP);
+    if (!s_flowCanvas || !s_flowBuf) return;
+    // Clear to fully transparent with one memset: all-zero bytes = black at alpha 0 in
+    // TRUE_COLOR_ALPHA. lv_canvas_fill_bg() sets each of the ~217k pixels through per-pixel
+    // helper calls, which took ~150 ms here and stalled the UI on every poll.
+    memset(s_flowBuf, 0, LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(SCREEN_W, SCREEN_H));
+    lv_obj_invalidate(s_flowCanvas);
     for (const FlowSeg &s : s_flow) flow_draw_seg(s);
 }
 

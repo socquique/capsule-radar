@@ -20,6 +20,7 @@ bool weather_fetch(double lat, double lon, WeatherSnapshot &out) {
 
     WiFiClientSecure client;
     client.setInsecure();
+    client.setHandshakeTimeout(TLS_HANDSHAKE_S);  // core default is 120 s; see TLS_HANDSHAKE_S
     HTTPClient http;
     http.setReuse(false);
     http.setConnectTimeout(3500);

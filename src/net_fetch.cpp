@@ -1,6 +1,7 @@
 // Shared streamed-download helper (see net_fetch.h). Mirrors the proven pattern in
 // photo_client.cpp: Content-Length -> stream into PSRAM; chunked -> getString decode.
 #include "net_fetch.h"
+#include "config.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -15,6 +16,7 @@ bool net_fetch_psram(const char *url, const char *userAgent,
 
     WiFiClientSecure cli;
     cli.setInsecure();                        // hobby device (matches the other clients)
+    cli.setHandshakeTimeout(TLS_HANDSHAKE_S);  // core default is 120 s; see TLS_HANDSHAKE_S
     HTTPClient http;
     http.setReuse(false);
     http.setConnectTimeout(connectTimeoutMs);

@@ -119,6 +119,7 @@ bool route_fetch(const char *callsign, char *from, size_t fn, char *to, size_t t
 
     WiFiClientSecure client;
     client.setInsecure();
+    client.setHandshakeTimeout(TLS_HANDSHAKE_S);  // core default is 120 s; see TLS_HANDSHAKE_S
     HTTPClient http;
     http.setReuse(false);
     http.setConnectTimeout(3000);   // short: runs on the feed task, don't stall the live poll
