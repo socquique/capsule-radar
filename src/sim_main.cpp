@@ -315,22 +315,26 @@ int main(int argc, char **argv) {
             }
             radar::select(0);                            // select an aircraft so the card shows
             ui_on_data_updated();
-            { char wc[12]; if (route_pending(wc, sizeof(wc))) route_store(wc, "Madrid", "London"); }
+            { char wc[12]; if (route_pending(wc, sizeof(wc))) route_store(wc, "Puerto del Rosario", "Frankfurt am Main"); }   // long: exercises the card's dot-out
             ui_on_data_updated();                        // pick up the mock route for the card
             int ow, oh;
             SDL_GetRendererOutputSize(s_ren, &ow, &oh);
-            struct Shot { const char *name; int view; int theme; bool forecast; };
-            const Shot shots[8] = {
-                { "radar",  0, THEME_PHOSPHOR, false },
-                { "orb", 0, THEME_ORB, false },
-                { "amber",  0, THEME_AMBER, false },
-                { "military",0, THEME_MILITARY, false },
-                { "list",   1, THEME_PHOSPHOR, false },
-                { "stats",  2, THEME_PHOSPHOR, false },
-                { "weather",3, THEME_PHOSPHOR, false },
-                { "forecast",3, THEME_PHOSPHOR, true },
+            struct Shot { const char *name; int view; int theme; bool forecast; int units; };
+            const Shot shots[9] = {
+                { "radar",  0, THEME_PHOSPHOR, false, 0 },
+                { "orb", 0, THEME_ORB, false, 0 },
+                { "amber",  0, THEME_AMBER, false, 0 },
+                { "military",0, THEME_MILITARY, false, 0 },
+                { "metric", 0, THEME_PHOSPHOR, false, 1 },   // scope labels + card in metres
+                { "list",   1, THEME_PHOSPHOR, false, 0 },
+                { "stats",  2, THEME_PHOSPHOR, false, 0 },
+                { "weather",3, THEME_PHOSPHOR, false, 0 },
+                { "forecast",3, THEME_PHOSPHOR, true, 0 },
             };
-            for (int v = 0; v < 8; ++v) {
+            for (int v = 0; v < 9; ++v) {
+                ui_set_units(shots[v].units);
+                ui_set_range_km(g_set.rangeKm);   // like handleUnits() on the device: zoom label,
+                ui_on_data_updated();             // then the card/list in the new units
                 radar::setTheme(shots[v].theme);
                 ui_set_weather_forecast(shots[v].forecast);
                 ui_show_view(shots[v].view);
@@ -347,6 +351,7 @@ int main(int argc, char **argv) {
                     printf("[sim] saved %s\n", path);
                 }
             }
+            ui_set_units(0);
             radar::setTheme(THEME_PHOSPHOR);
             run = false;
         }

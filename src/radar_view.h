@@ -31,7 +31,8 @@ struct AcInfo {
     float vsFpm;        // NaN if unknown
     float gsKt;         // NaN if unknown
     float distKm;
-    float bearingDeg;
+    float bearingDeg;   // bearing from home (deg)
+    float track;        // ground track deg (NaN if unknown) — the heading the glyph points
     int   squawk;       // -1 if unknown
     bool  emergency;
 };
@@ -49,6 +50,9 @@ int  hitTest(int x, int y);
 
 // Selection (tracked by hex so it survives data updates). idx < 0 clears.
 void select(int idx);
+// Select by hex: the list captures it at touch-down, because polls rewrite its rows in
+// place. False (selection unchanged) when that aircraft has left the feed.
+bool selectHex(const char* hex);
 bool selected(AcInfo& out);                 // false if nothing selected/visible
 
 // Snapshot access for the list / stats views.
@@ -76,5 +80,6 @@ bool airportsEnabled();
 void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=long (aircraft trails + flow)
 void setMaxOnScreen(int n);                       // how many (nearest) aircraft to draw on the scope
 void setLargeText(bool on);                       // accessibility: bigger glyph labels. Call BEFORE init()
+void setUnits(int preset);                       // 0 = feet · 1 = metres (scope altitude labels; same presets as ui_set_units)
 
 } // namespace radar
