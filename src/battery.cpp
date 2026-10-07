@@ -32,6 +32,11 @@ bool battery_begin() {
 bool battery_present()  { return s_ok && PMU.isBatteryConnect(); }
 int  battery_percent()  { return s_ok ? PMU.getBatteryPercent() : -1; }
 bool battery_charging() { return s_ok && PMU.isCharging(); }
+// USB/DC input present. XPowersLib's isCharging() goes false once the battery is FULL,
+// so "present && !charging" reads as discharging on a USB-tethered, full device — which
+// needlessly dropped the poll rate to POLL_INTERVAL_BATTERY_MS. isVbusIn() stays true
+// while the device is externally powered.
+bool battery_vbus_in()  { return s_ok && PMU.isVbusIn(); }
 
 void battery_enable_codec_rail() {
     if (!s_ok) return;
@@ -46,6 +51,7 @@ bool battery_begin()   { Serial.println("[batt] no PMIC on this board"); return 
 bool battery_present() { return false; }
 int  battery_percent() { return -1; }
 bool battery_charging(){ return false; }
+bool battery_vbus_in() { return false; }
 void battery_enable_codec_rail() {}
 
 #endif  // BOARD_HAS_PMIC
