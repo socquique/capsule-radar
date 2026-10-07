@@ -86,7 +86,9 @@ static volatile bool         g_requery = false;                      // range ch
 static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
+static volatile uint32_t     g_powerOffAtMs = 0;                     // !=0: AXP2101 power-off when millis() reaches it
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
+static bool                  g_pmicOk = false;                       // AXP2101 answered (powers the power-off paths)
 static bool                  g_updateBlocked = false;                // /update: refused at START (cross-site), 403 sent on completion
 static bool                  g_updateDone = false;                   // /update: Update.end() succeeded -> the completion handler may reboot
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
@@ -409,7 +411,7 @@ static WebServer g_web(80);
 //  - requestCrossSite() refuses what the browser itself marks as cross-site. Over plain
 //    http:// browsers send NO Sec-Fetch-Site (Fetch Metadata only goes to HTTPS and
 //    localhost), but every cross-site POST carries Origin. That guards the POSTs (/save,
-//    /wifi, /update): plain HTML forms send those, so they cannot carry a
+//    /wifi, /poweroff, /update): plain HTML forms send those, so they cannot carry a
 //    custom header. Same-origin requests and header-less clients (curl, the IDE's
 //    uploader) pass.
 //  - refuseUnlessPageFetch() guards the live-setting GETs (/bright, /vol, ...) as well. A
@@ -1146,9 +1148,16 @@ void setup() {
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
+    // (power-off button: registered below, only when the PMIC actually answered)
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
-    battery_begin();   // AXP2101 (no-op if not detected / no battery)
+    g_pmicOk = battery_begin();   // AXP2101 (false if it did not answer)
+#if BOARD_HAS_PMIC
+    // Power-off drives the AXP2101, so offer the Stats button only when one answered
+    // (a null callback keeps it hidden; the web /poweroff also answers 501 below).
+    if (g_pmicOk)
+        ui_set_poweroff_cb([]() { g_powerOffAtMs = millis() + 600; });   // let 'Powering off' render first
+#endif
     gps_begin();       // LC76G GNSS (no-op if not the -G variant)
     gps_set_idle_hook(display::sweepTick);   // keep the sweep moving during GPS reads (it never touches I2C)
     battery_enable_codec_rail();   // power the ES8311 analog rail before audio init
@@ -1224,6 +1233,18 @@ void setup() {
     g_web.on("/maxac", handleMaxAc);
     g_web.on("/bigtext", handleBigText);
     g_web.on("/rotate", handleRotate);
+    g_web.on("/poweroff", HTTP_POST, []() {
+        if (refuseIfCrossSite()) return;
+#if !BOARD_HAS_PMIC
+        g_web.send(501, "text/plain", "power off not supported on this board");
+#else
+        // Registered the Stats button on the same condition (setup): driving the
+        // AXP2101 shutdown is the ONLY power-off path this firmware has.
+        if (!g_pmicOk) { g_web.send(501, "text/plain", "power off not supported: PMIC not detected"); return; }
+        g_web.send(200, "text/plain", "powering off");
+        g_powerOffAtMs = millis() + 800;
+#endif
+    });
     g_web.on("/gps", handleGps);
     g_web.on("/units", handleUnits);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
@@ -1256,6 +1277,7 @@ void loop() {
 
     // scheduled reboot after a fresh WiFi config (see setSaveConfigCallback)
     if (g_rebootAtMs && (int32_t)(millis() - g_rebootAtMs) >= 0) { delay(50); ESP.restart(); }
+    if (g_powerOffAtMs && (int32_t)(millis() - g_powerOffAtMs) >= 0) { g_powerOffAtMs = 0; battery_power_off(); }
 
     // Car use: the saved WiFi often appears 30-60 s AFTER boot (vehicle hotspot). If we booted
     // into the portal despite having saved credentials, keep retrying them in the background;
