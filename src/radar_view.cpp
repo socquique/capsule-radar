@@ -83,6 +83,7 @@ static bool       s_sweepEnabled    = true;
 static bool       s_airportsEnabled = true;
 static int        s_maxOnScreen     = 20;          // how many (nearest) aircraft to draw (web-configurable)
 static bool       s_bigText         = false;       // accessibility: bigger glyph labels (set before init)
+static int        s_units    = 0;           // scope altitude labels: 0 = ft · 1 = m (setUnits)
 static int        s_trailMax        = TRAIL_MAX;   // per-aircraft trail length (0 = off)
 static int        s_flowMax         = FLOW_MAX;    // persistent flow-layer segments, count cap (0 = off)
 static int        s_flowGenMax      = 14;          // ...and an age cap in polls (~2 s each) so tracks fade out
@@ -132,6 +133,31 @@ static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb() { return s_theme == THEME_ORB; }
 
+// The aircraft the scope draws, and so the ones a tap can hit: the nearest s_maxOnScreen,
+// then Orb's own caps (ORB_BLIPS in-range balls, ORB_ARROWS off-range arrows); phosphor
+// draws in-range traffic only. The selected aircraft is drawn wherever it sits, past every
+// cap: the list shows the whole feed, so a row picked there must still get its glyph, its
+// ring and a tap target. ac_draw_cb, hitTest and the Orb wave refresh all walk this one
+// list, so they cannot disagree about what is on screen.
+template <typename F>
+static void for_each_drawn(F &&fn) {
+    const bool drg = orb();
+    int shown = 0, balls = 0, arrows = 0;
+    for (size_t i = 0; i < s_acs.size(); ++i) {
+        const AcDraw &ac = s_acs[i];
+        const bool sel = !s_selHex.empty() && s_selHex == ac.hex;
+        if (++shown > s_maxOnScreen && !sel) continue;
+        if (drg) {
+            int &n = ac.inRange ? balls : arrows;
+            if (n >= (ac.inRange ? ORB_BLIPS : ORB_ARROWS) && !sel) continue;
+            ++n;
+        } else if (!ac.inRange) {
+            continue;
+        }
+        fn(i, ac);
+    }
+}
+
 static void show(lv_obj_t *o, bool v) {
     if (!o) return;
     if (v) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
@@ -145,6 +171,12 @@ static lv_color_t alt_color(float altFt, bool onGround) {
     if (altFt < 20000) return lv_color_hex(0xC8FF3C);
     if (altFt < 30000) return lv_color_hex(0x39FF14);
     return lv_color_hex(0x3CE0FF);
+}
+// Per-aircraft altitude label under the glyph. Same ft/m rule as ui.cpp fmt_alt().
+static void fmt_alt_txt(char *dst, size_t n, float altFt, bool onGround) {
+    if (onGround)          snprintf(dst, n, "GND");
+    else if (s_units == 1) snprintf(dst, n, "%.0f m", (double)altFt * 0.3048f);
+    else                   snprintf(dst, n, "%.0f ft", (double)altFt);
 }
 
 static inline lv_point_t rim_point(float bearingDeg, float r) {
@@ -343,15 +375,12 @@ static void sweep_timer_cb(lv_timer_t *t) {
         s_wavePhase += 0.05f;
         if (s_wavePhase >= 1.0f) s_wavePhase -= 1.0f;
         if (!s_acLayer) return;
-        int balls = 0;
-        for (const AcDraw &ac : s_acs) {
-            if (!ac.inRange) continue;
-            if (balls >= ORB_BLIPS) break;
-            balls++;
+        for_each_drawn([](size_t, const AcDraw &ac) {
+            if (!ac.inRange) return;                 // only the balls carry waves
             lv_area_t a = { (lv_coord_t)(ac.pos.x - 44), (lv_coord_t)(ac.pos.y - 44),
                             (lv_coord_t)(ac.pos.x + 44), (lv_coord_t)(ac.pos.y + 44) };
             lv_obj_invalidate_area(s_acLayer, &a);
-        }
+        });
         return;
     }
     if (!s_sweepEnabled) return;          // sweep disabled: glyph interpolation above still runs
@@ -448,22 +477,16 @@ static void draw_offrange(lv_draw_ctx_t *d, const AcDraw &ac) {
 static void ac_draw_cb(lv_event_t *e) {
     lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
     const bool drg = orb();
-    int balls = 0, arrows = 0;
 
-    for (const AcDraw &ac : s_acs) {
+    for_each_drawn([&](size_t, const AcDraw &ac) {
         if (drg) {
             if (ac.inRange) {
-                if (balls >= ORB_BLIPS) continue;   // up to 7 in-range balls
                 draw_trail(d, ac, ORB_FLOW);
                 draw_ball(d, ac);
-                balls++;
             } else {
-                if (arrows >= ORB_ARROWS) continue;  // up to 8 off-range arrows
                 draw_offrange(d, ac);
-                arrows++;
             }
         } else {
-            if (!ac.inRange) continue;            // phosphor shows in-range traffic only
             draw_trail(d, ac, ac.color);
             const float th = ((ac.track != ac.track) ? 0.0f : ac.track) * (float)M_PI / 180.0f;
             const float c = cosf(th), s = sinf(th);
@@ -519,7 +542,7 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_area_t a2 = { a1.x1, (lv_coord_t)(ac.pos.y + 4), a1.x2, (lv_coord_t)(ac.pos.y + 26) };
             if (ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);
         }
-    }
+    });
 }
 
 // =============================== helpers =====================================
@@ -657,6 +680,16 @@ void setMaxOnScreen(int n) {
 
 void setLargeText(bool on) {
     s_bigText = on;
+    if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+
+// Scope altitude labels (ft/m). Refreshes the baked label text so a change shows without
+// waiting for the next poll.
+void setUnits(int preset) {
+    const int u = (preset == 1) ? 1 : 0;   // only ft/m differ on the scope
+    if (u == s_units) return;
+    s_units = u;
+    for (AcDraw &a : s_acs) fmt_alt_txt(a.altTxt, sizeof(a.altTxt), a.altFt, a.onGround);
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
 
@@ -805,8 +838,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         d.distKm = (float)distKm;
         d.bearingDeg = (float)brg;
         d.squawk = ac.squawk;
-        if (ac.onGround) snprintf(d.altTxt, sizeof(d.altTxt), "GND");
-        else             snprintf(d.altTxt, sizeof(d.altTxt), "%.0f ft", (double)ac.altBaro);
+        fmt_alt_txt(d.altTxt, sizeof(d.altTxt), ac.altBaro, ac.onGround);
 
         const std::string key = ac.hex.c_str();
         present.insert(key);
@@ -852,10 +884,10 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         if (pruned) flow_redraw_all();
     }
 
-    // nearest first (the blips + the list); cap to keep work bounded (web-configurable)
+    // nearest first (the blips + the list). s_maxOnScreen is applied only when drawing /
+    // hit-testing (the nearest N) — count/list/stats/info must see the full set.
     std::sort(out.begin(), out.end(),
               [](const AcDraw &a, const AcDraw &b) { return a.distKm < b.distKm; });
-    if ((int)out.size() > s_maxOnScreen) out.resize(s_maxOnScreen);
 
     if (++s_flowRedrawCtr >= FLOW_REDRAW_EVERY) {
         s_flowRedrawCtr = 0;
@@ -882,18 +914,12 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
 int hitTest(int x, int y) {
     int best = -1;
     long bestD = (long)TAP_RADIUS_PX * TAP_RADIUS_PX;
-    const bool drg = orb();
-    int balls = 0, arrows = 0;
-    for (size_t i = 0; i < s_acs.size(); ++i) {
-        if (drg) {
-            if (s_acs[i].inRange) { if (balls >= ORB_BLIPS) continue; balls++; }
-            else { if (arrows >= ORB_ARROWS) continue; arrows++; }
-        } else if (!s_acs[i].inRange) continue;
-        const long dx = (long)s_acs[i].pos.x - x;
-        const long dy = (long)s_acs[i].pos.y - y;
+    for_each_drawn([&](size_t i, const AcDraw &ac) {   // exactly what ac_draw_cb drew
+        const long dx = (long)ac.pos.x - x;
+        const long dy = (long)ac.pos.y - y;
         const long dd = dx * dx + dy * dy;
         if (dd <= bestD) { bestD = dd; best = (int)i; }
-    }
+    });
     return best;
 }
 
@@ -903,7 +929,7 @@ static void fill_info(const AcDraw &a, AcInfo &out) {
     snprintf(out.type, sizeof(out.type), "%s", a.type);
     out.altFt = a.altFt; out.onGround = a.onGround;
     out.vsFpm = a.vsFpm; out.gsKt = a.gsKt;
-    out.distKm = a.distKm; out.bearingDeg = a.bearingDeg;
+    out.distKm = a.distKm; out.bearingDeg = a.bearingDeg; out.track = a.track;
     out.squawk = a.squawk; out.emergency = a.emergency;
 }
 
@@ -911,6 +937,16 @@ void select(int idx) {
     if (idx < 0 || idx >= (int)s_acs.size()) s_selHex.clear();
     else s_selHex = s_acs[idx].hex;
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+
+bool selectHex(const char *hex) {
+    for (const AcDraw &a : s_acs)
+        if (strcmp(a.hex, hex) == 0) {
+            s_selHex = a.hex;
+            if (s_acLayer) lv_obj_invalidate(s_acLayer);
+            return true;
+        }
+    return false;
 }
 
 bool selected(AcInfo &out) {

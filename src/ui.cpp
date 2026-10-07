@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include <vector>
 
 #define UI_GREEN lv_color_hex(0x1DFF86)
 #define UI_INK   lv_color_hex(0xEAFFF3)
@@ -56,7 +57,10 @@ static lv_obj_t *s_fcDayRain[3] = { nullptr, nullptr, nullptr };
 // 0 = Aviation (ft, kt, km) · 1 = Metric (m, km/h, km) · 2 = Imperial (ft, mph, mi).
 // The feed gives altitude in ft, speed in kt, vertical speed in fpm, distance in km.
 static int s_units = 0;
-void ui_set_units(int u) { s_units = (u < 0 || u > 2) ? 0 : u; }
+void ui_set_units(int u) {
+    s_units = (u < 0 || u > 2) ? 0 : u;
+    radar::setUnits(s_units);   // scope altitude labels (ft/m) follow the same preset
+}
 
 // Accessibility: "large text" swaps every font one-or-two steps up. The flag must be
 // set BEFORE ui_create() — fonts are baked into the widgets at creation time (the web
@@ -155,16 +159,20 @@ static void refresh_card(void) {
     lv_label_set_text(s_cardTitle, title);
     lv_obj_set_style_text_color(s_cardTitle, in.emergency ? UI_EMERG : UI_INK, 0);
 
-    char altS[16], vsS[24], spdS[16], sqS[16];
+    char altS[16], vsS[24], spdS[16], sqS[16], hdgS[8];
     fmt_alt(altS, sizeof(altS), in.altFt, in.onGround);
     fmt_vs (vsS,  sizeof(vsS),  in.vsFpm);
     fmt_spd(spdS, sizeof(spdS), in.gsKt);
     if (in.squawk < 0)          snprintf(sqS, sizeof(sqS), "-");
     else                        snprintf(sqS, sizeof(sqS), "%04d", in.squawk);
+    // HDG is the aircraft's own ground track (what rotates the glyph), not the bearing
+    // from home — NaN (unknown) prints as "-".
+    if (in.track != in.track)   snprintf(hdgS, sizeof(hdgS), "-");
+    else                        snprintf(hdgS, sizeof(hdgS), "%03.0f", in.track);
 
     char left[96], right[96];
     snprintf(left,  sizeof(left),  "ALT  %s\nSPD  %s\nDIST %.1f %s", altS, spdS, dist_val(in.distKm), dist_unit());
-    snprintf(right, sizeof(right), "V/S  %s\nHDG  %03.0f\nSQK  %s", vsS, in.bearingDeg, sqS);
+    snprintf(right, sizeof(right), "V/S  %s\nHDG  %s\nSQK  %s", vsS, hdgS, sqS);
     lv_label_set_text(s_cardL, left);
     lv_label_set_text(s_cardR, right);
 
@@ -252,12 +260,48 @@ void ui_set_range_km(float km) {
     s_rangeIdx = best;
 }
 
-static void radar_press_cb(lv_event_t *e) { (void)e; s_longPressed = false; }
+// Long-press cycles the visual theme — but only if the finger never drags: cycling at
+// LONG_PRESSED time meant a press that turned into a view swipe changed the theme too.
+// Arm on long press, cycle on release, cancel on any drag/scroll.
+static bool s_lpArmed = false;      // long-press timer passed, finger still down
+static bool s_lpMoved = false;      // finger travelled past the drag threshold since the press
+static lv_point_t s_lpOrigin;
+#define LP_MOVE_PX 10   // finger travel that counts as a drag (matches LVGL's scroll limit)
 
-static void radar_longpress_cb(lv_event_t *e) {   // long-press cycles the visual theme
+static void radar_press_cb(lv_event_t *e) {
+    s_longPressed = false;
+    s_lpArmed = false;
+    s_lpMoved = false;
+    lv_indev_t *indev = lv_event_get_indev(e);
+    if (indev) lv_indev_get_point(indev, &s_lpOrigin);
+}
+
+static void radar_pressing_cb(lv_event_t *e) {   // any real finger travel cancels the theme cycle
+    if (s_lpMoved) return;
+    lv_indev_t *indev = lv_event_get_indev(e);
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    const long dx = (long)p.x - s_lpOrigin.x, dy = (long)p.y - s_lpOrigin.y;
+    if (dx * dx + dy * dy > (long)LP_MOVE_PX * LP_MOVE_PX) s_lpMoved = true;
+}
+
+static void radar_longpress_cb(lv_event_t *e) {   // hold passed: arm, act on release
     (void)e;
-    radar::cycleTheme();
-    s_longPressed = true;
+    if (s_lpMoved) return;
+    s_lpArmed = true;
+    s_longPressed = true;   // the release after a hold is not a tap
+}
+
+static void radar_release_cb(lv_event_t *e) {   // still finger lifted -> cycle the theme
+    (void)e;
+    if (s_lpArmed && !s_lpMoved) radar::cycleTheme();
+    s_lpArmed = false;
+}
+
+static void radar_presslost_cb(lv_event_t *e) {   // scroll stole the press: a swipe, not a hold
+    (void)e;
+    s_lpArmed = false;
 }
 
 static void radar_clicked_cb(lv_event_t *e) {
@@ -269,14 +313,6 @@ static void radar_clicked_cb(lv_event_t *e) {
     lv_indev_get_point(indev, &p);
     radar::select(radar::hitTest(p.x, p.y));   // hit -> select; miss -> clear
     refresh_card();
-}
-
-static void list_btn_cb(lv_event_t *e) {
-    lv_obj_t *b = lv_event_get_target(e);
-    const int idx = (int)(intptr_t)lv_obj_get_user_data(b);
-    radar::select(idx);
-    refresh_card();
-    lv_obj_set_tile_id(s_tv, 0, 0, LV_ANIM_ON);   // jump back to the radar
 }
 
 // ----------------------------------------------------------------- list/stats
@@ -361,11 +397,71 @@ void ui_set_gps(int state, int sats, float altM) {
     }
 }
 
-// Rebuild the scrollable contact list. Costly (deletes+recreates LVGL buttons), so we
-// only call it when the list tile is actually visible — not on every 2 s poll.
+// Refresh the scrollable contact list. Rows are updated in place and only added/removed
+// at the end: recreating every row (the old lv_obj_clean) reset the scroll to the top on
+// every poll and deleted the row under a pressing finger, eating taps.
+// A row is a plain full-width label and taps are hit-tested on the list itself: a
+// button-style row (lv_list_add_btn + per-row events/styles/user_data) costs ~0.7 KB of
+// LVGL's 64 KB pool and exhausts it when the list shows the full feed (60 aircraft).
+static std::vector<lv_obj_t *> s_listRows;
+// Whether each row currently carries s_rowEmgStyle. lv_obj_add_style() does not
+// de-duplicate and the per-object style count is a 6-bit field: re-adding the style on
+// every poll would overflow it after 64 refreshes and crash the radar. Touch the style
+// only when a row's emergency state changes.
+static std::vector<bool> s_listRowEmg;
+// Shared styles (one copy each, not per-row local styles that cost pool memory per row).
+// s_rowStyle reproduces the old lv_list button look: full width, a row every 42 px with
+// F16, a 1 px separator underneath in the default theme's grey.
+static lv_style_t s_rowStyle, s_rowEmgStyle;
+static bool s_rowStylesInit = false;
+
+// Taps land on the list container (rows are not clickable); map the point to a row.
+// The aircraft is picked at touch-down, by hex: build_list rewrites rows in place on every
+// poll, so mapping the row only at release could open a different plane if a poll landed
+// between press and release.
+static char s_listPressHex[sizeof(AcInfo::hex)];
+
+static void list_press_cb(lv_event_t *e) {
+    (void)e;
+    s_listPressHex[0] = '\0';
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    lv_area_t la, a;
+    lv_obj_get_coords(s_list, &la);
+    if (p.x < la.x1 || p.x > la.x2) return;
+    for (size_t i = 0; i < s_listRows.size(); ++i) {
+        lv_obj_get_coords(s_listRows[i], &a);
+        if (p.y >= a.y1 && p.y <= a.y2 + 2) {     // +2 swallows the 2 px row gap
+            AcInfo in;                              // row i shows radar::info(i) (build_list)
+            if (radar::info((int)i, in)) snprintf(s_listPressHex, sizeof(s_listPressHex), "%s", in.hex);
+            return;
+        }
+    }
+}
+
+static void list_tap_cb(lv_event_t *e) {
+    (void)e;
+    if (!s_listPressHex[0] || !radar::selectHex(s_listPressHex)) return;   // left the feed mid-press
+    refresh_card();
+    lv_obj_set_tile_id(s_tv, 0, 0, LV_ANIM_ON);   // jump back to the radar
+}
+
 static void build_list(void) {
     if (!s_list) return;
-    lv_obj_clean(s_list);
+    if (!s_rowStylesInit) {
+        lv_style_init(&s_rowStyle);
+        lv_style_set_width(&s_rowStyle, lv_pct(100));
+        lv_style_set_pad_hor(&s_rowStyle, 13);
+        lv_style_set_pad_ver(&s_rowStyle, 10);
+        lv_style_set_border_side(&s_rowStyle, LV_BORDER_SIDE_BOTTOM);
+        lv_style_set_border_width(&s_rowStyle, 1);
+        lv_style_set_border_color(&s_rowStyle, lv_color_hex(0xE0E0E0));
+        lv_style_init(&s_rowEmgStyle);   // emergency rows only: red text (the rest inherits)
+        lv_style_set_text_color(&s_rowEmgStyle, UI_EMERG);
+        s_rowStylesInit = true;
+    }
     const int n = radar::count();
     for (int i = 0; i < n; ++i) {
         AcInfo in;
@@ -374,12 +470,30 @@ static void build_list(void) {
         fmt_alt(altS, sizeof(altS), in.altFt, in.onGround);
         snprintf(txt, sizeof(txt), "%-8.8s  %-8s %4.1f %s",
                  in.call[0] ? in.call : in.hex, altS, dist_val(in.distKm), dist_unit());
-        lv_obj_t *b = lv_list_add_btn(s_list, NULL, txt);
-        lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_text_color(b, in.emergency ? UI_EMERG : UI_SOFT, 0);
-        lv_obj_set_style_text_font(b, F16(), 0);
-        lv_obj_set_user_data(b, (void *)(intptr_t)i);
-        lv_obj_add_event_cb(b, list_btn_cb, LV_EVENT_CLICKED, NULL);
+        if (i < (int)s_listRows.size()) {          // existing row: just refresh its content
+            lv_obj_t *l = s_listRows[i];
+            lv_label_set_text(l, txt);
+            if (s_listRowEmg[i] != in.emergency) {
+                if (in.emergency) lv_obj_add_style(l, &s_rowEmgStyle, 0);
+                else              lv_obj_remove_style(l, &s_rowEmgStyle, 0);
+                s_listRowEmg[i] = in.emergency;
+            }
+        } else {                                   // new row: append at the end
+            lv_obj_t *l = lv_label_create(s_list);
+            lv_obj_add_style(l, &s_rowStyle, 0);
+            lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);   // fixed width: a long line ends in '...'
+            lv_label_set_text(l, txt);
+            if (in.emergency) lv_obj_add_style(l, &s_rowEmgStyle, 0);
+            s_listRows.push_back(l);
+            s_listRowEmg.push_back(in.emergency);
+        }
+    }
+    // Surplus rows go from the end — safe mid-press: the press lives on the list container,
+    // and list_press_cb already took the pressed plane's hex, not a row pointer.
+    for (int i = (int)s_listRows.size() - 1; i >= n; --i) {
+        lv_obj_del(s_listRows[i]);
+        s_listRows.erase(s_listRows.begin() + i);
+        s_listRowEmg.erase(s_listRowEmg.begin() + i);
     }
 }
 
@@ -677,6 +791,9 @@ static void build_card(void) {
     s_cardRoute = lv_label_create(s_card);
     lv_obj_set_style_text_font(s_cardRoute, F14(), 0);
     lv_obj_set_style_text_color(s_cardRoute, UI_GREEN, 0);
+    // fill the card width and dot out long "Origin -> Destination" instead of clipping
+    lv_obj_set_width(s_cardRoute, s_bigText ? 292 : 276);   // card 316/300 minus pad 12 x2
+    lv_label_set_long_mode(s_cardRoute, LV_LABEL_LONG_DOT);
     lv_obj_align(s_cardRoute, LV_ALIGN_TOP_LEFT, 0, s_bigText ? 100 : 76);
 
     // aircraft photo + credit, floating above the card (hidden until one loads)
@@ -792,7 +909,10 @@ void ui_create(void) {
     lv_obj_add_flag(s_tileRadar, LV_OBJ_FLAG_CLICKABLE);     // receive taps (planes/empty)
     lv_obj_add_event_cb(s_tileRadar, radar_clicked_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_tileRadar, radar_pressing_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_event_cb(s_tileRadar, radar_release_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(s_tileRadar, radar_presslost_cb, LV_EVENT_PRESS_LOST, NULL);
     build_card();
 
     // on-screen range/zoom button (reliable single tap; bottom, above the 'S' marker)
@@ -872,6 +992,11 @@ void ui_create(void) {
     lv_obj_set_style_bg_opa(s_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_list, 0, 0);
     lv_obj_set_style_pad_row(s_list, 2, 0);
+    // rows are plain labels: they inherit font/colour from here (see build_list)
+    lv_obj_set_style_text_font(s_list, F16(), 0);
+    lv_obj_set_style_text_color(s_list, UI_SOFT, 0);
+    lv_obj_add_event_cb(s_list, list_press_cb, LV_EVENT_PRESSED, NULL);  // pick the plane at touch-down
+    lv_obj_add_event_cb(s_list, list_tap_cb, LV_EVENT_CLICKED, NULL);   // rows aren't clickable
 
     // --- stats tile (circular panel) ---
     lv_obj_t *sp = make_round_panel(s_tileStats);
