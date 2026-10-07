@@ -34,7 +34,7 @@ A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Touch-AMOLED-1.75**
   - **Phosphor** — green-on-black radar scope: rings, animated sweep, aircraft glyphs rotated by heading and color-coded by altitude, fading trails, emergency halo.
   - **Orb** — green gradient + grid scope: the 7 nearest aircraft as yellow orbs emitting waves, off-range traffic as edge arrows pointing its way, orange target rings.
   - **Amber CRT** and **Military** — the same scope retinted (warm amber / night-vision green).
-- **Touch** (CST9217): tap an aircraft → detail card (callsign, type, altitude, vertical speed, ground speed, distance, heading, squawk, and **origin → destination** looked up from adsbdb, cached in NVS). **Double-tap** to cycle zoom range. Swipe between **Radar / List / Stats** (circular layouts).
+- **Touch** (CST9217): tap an aircraft → detail card (callsign, type, altitude, vertical speed, ground speed, distance, ground track (HDG), squawk, and **origin → destination** looked up from adsbdb, cached in NVS). The on-screen zoom button cycles the zoom range (10–150 km). Swipe between **Radar / List / Stats** (circular layouts).
 - **Boot splash** + **alert pings** (ES8311 speaker): a soft ping when a new aircraft enters range, an urgent double-beep for emergency/military — volume & mute on the web page.
 - **Smooth motion**: aircraft glyphs glide between polls (interpolated) instead of jumping, using cheap partial redraws.
 - **Top HUD**: WiFi status (amber if the data feed is failing), in-range aircraft count, NTP/RTC clock, **battery %** (charging bolt, red when low), and the date. The Stats view footer shows how to reach the config page (`capsuleradar.local` + IP).
@@ -130,7 +130,7 @@ src/
   imu_qmi8658.*      accelerometer (face-down sleep)
   battery.*          AXP2101 battery gauge
   rtc_pcf85063.*     PCF85063 real-time clock
-  adsb_client.*      airplanes.live fetch + parse
+  adsb_client.*      airplanes.live / adsb.fi / adsb.lol fetch + parse (with adsb_pacing.h)
   route*.* route.*   origin→destination lookup (adsbdb)
   sim_main.cpp       native SDL simulator (not flashed)
 include/lv_conf.h    LVGL config (v8)
