@@ -1,9 +1,9 @@
-// Capsule Radar — entry point / glue. SKELETON: TODOs mark what to implement.
-// Order of work is in CLAUDE.md (milestones). Bring up the Waveshare demo first.
+// Capsule Radar — entry point / glue.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <vector>
 #include "config.h"
+#include "web_input.h"              // strict parsing of numbers from the config page
 #include "aircraft.h"
 #include "geo.h"
 #include "adsb_client.h"
@@ -87,6 +87,8 @@ static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
+static bool                  g_updateBlocked = false;                // /update: refused at START (cross-site), 403 sent on completion
+static bool                  g_updateDone = false;                   // /update: Update.end() succeeded -> the completion handler may reboot
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
 static volatile bool         g_weatherDirty = false;
 static volatile bool         g_wxRadarDirty = false;
@@ -277,7 +279,9 @@ static void loadSettings() {
     p.begin("capsuleradar", true);
     g_settings.homeLat = p.getDouble("homeLat", HOME_LAT_DEFAULT);
     g_settings.homeLon = p.getDouble("homeLon", HOME_LON_DEFAULT);
-    g_settings.rangeKm = p.getFloat("rangeKm", RANGE_KM_DEFAULT);
+    // Snap onto the preset steps: an old install may hold a value the web page once
+    // offered (e.g. its 250 km) or even 0 (divides by zero in geo::projectToScreen).
+    g_settings.rangeKm = snapRangeKm(p.getFloat("rangeKm", RANGE_KM_DEFAULT));
     // floor of 5: a stored 0 would boot with the panel dark forever, looking like a dead board
     g_brightnessDay    = constrain(p.getInt("bright", BRIGHTNESS_DEFAULT), 5, 255);
     g_volume           = p.getInt("vol", 60);
@@ -398,18 +402,74 @@ static void applyBrightness() {
 // ----------------------------- configuration web --------------------------------
 static WebServer g_web(80);
 
+// ---- cross-site request guard (CSRF) ----
+// A hostile web page can make the VICTIM's browser send requests to this device, which
+// sits on the same LAN. It cannot read any answer (we send no CORS headers), so refusing
+// the request defeats it. Two layers:
+//  - requestCrossSite() refuses what the browser itself marks as cross-site. Over plain
+//    http:// browsers send NO Sec-Fetch-Site (Fetch Metadata only goes to HTTPS and
+//    localhost), but every cross-site POST carries Origin. That guards the POSTs (/save,
+//    /wifi, /update): plain HTML forms send those, so they cannot carry a
+//    custom header. Same-origin requests and header-less clients (curl, the IDE's
+//    uploader) pass.
+//  - refuseUnlessPageFetch() guards the live-setting GETs (/bright, /vol, ...) as well. A
+//    cross-site <img src="http://capsuleradar.local/bright?v=5"> sends neither
+//    Sec-Fetch-Site nor Origin, so these also demand the WEB_PAGE_HDR header. Only a script
+//    can add a custom header, and a cross-origin fetch() with one needs a CORS preflight
+//    this server never approves; <img>, links and forms cannot send it at all. The config
+//    page's own fetch() calls (G() in its script) send it; curl needs -H 'X-Radar: 1'.
+#define WEB_PAGE_HDR "X-Radar"
+static bool requestCrossSite() {
+    const String sfs = g_web.header("Sec-Fetch-Site");
+    if (sfs.length() && sfs != "same-origin" && sfs != "none") return true;
+    const String origin = g_web.header("Origin");
+    if (origin.length()) {
+        // "http://192.168.4.1" / "https://capsuleradar.local": compare the authority
+        // with the Host header, ignoring default ports on either side.
+        const int scheme = origin.indexOf("://");
+        String auth = (scheme < 0) ? origin : origin.substring(scheme + 3);
+        const int slash = auth.indexOf('/');
+        if (slash >= 0) auth = auth.substring(0, slash);
+        String host = g_web.hostHeader();
+        if (auth.endsWith(":80"))  auth = auth.substring(0, auth.length() - 3);
+        if (auth.endsWith(":443")) auth = auth.substring(0, auth.length() - 4);
+        if (host.endsWith(":80"))  host = host.substring(0, host.length() - 3);
+        if (host.endsWith(":443")) host = host.substring(0, host.length() - 4);
+        if (!auth.equalsIgnoreCase(host)) return true;
+    }
+    return false;
+}
+
+// First line of every state-changing POST handler: rejects (and answers 403) or passes.
+static bool refuseIfCrossSite() {
+    if (!requestCrossSite()) return false;
+    g_web.send(403, "text/plain", "cross-site request rejected");
+    return true;
+}
+
+// First line of every live-setting GET handler (see the guard notes above).
+static bool refuseUnlessPageFetch() {
+    if (g_web.header(WEB_PAGE_HDR) != "1") {
+        g_web.send(403, "text/plain", "missing " WEB_PAGE_HDR " header");
+        return true;
+    }
+    return refuseIfCrossSite();
+}
+
 static void handleRoot() {
     const int th = radar::theme();
-    const int ranges[] = {10, 15, 25, 30, 50, 100, 150, 250};
+    // Same preset list as the zoom button (config.h); the page's own list offered 250 km,
+    // which the feed query clamps to ADSB_QUERY_MAX_KM — the outer rings stayed empty.
     // The value submitted stays in km (the device works in km); only the label is shown in
     // the user's chosen distance unit so the config page matches the screen.
     const float    ufac  = (g_units == 0) ? 0.539957f : (g_units == 2 ? 0.621371f : 1.0f);
     const char    *uname = (g_units == 0) ? "nm" : (g_units == 2 ? "mi" : "km");
     String ropts;
-    for (int r : ranges) {
+    for (float rkm : RANGE_STEPS_KM) {
+        const int r = (int)(rkm + 0.5f);
         char o[72];
         snprintf(o, sizeof(o), "<option value=%d%s>%.0f %s</option>",
-                 r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", r * ufac, uname);
+                 r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", rkm * ufac, uname);
         ropts += o;
     }
     const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military"};
@@ -591,26 +651,27 @@ static void handleRoot() {
         "MK.on('dragend',function(){S(MK.getLatLng());});"
         "MAP.on('click',function(e){MK.setLatLng(e.latlng);S(e.latlng);});"
         "setTimeout(function(){MAP.invalidateSize();},300);"
-        "function b(v,s){fetch('/bright?v='+v+(s?'&save=1':''))}"
-        "function v(x,s){fetch('/vol?v='+x+(s?'&save=1':''))}"
-        "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
-        "function t(){fetch('/vol?test=1')}"
-        "function d(v){fetch('/idle?v='+v+'&save=1')}"
-        "function fd(c){fetch('/fdsleep?v='+(c?1:0)+'&save=1')}"
-        "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
-        "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
-        "function hg(c){fetch('/ground?v='+(c?1:0)+'&save=1')}"
-        "function ma(v){fetch('/altmin?v='+v+'&save=1')}"
-        "function mb(v){fetch('/altmax?v='+v+'&save=1')}"
-        "function mo(c){fetch('/milonly?v='+(c?1:0)+'&save=1')}"
-        "function tl(v){fetch('/trail?v='+v+'&save=1')}"
-        "function mx(v){fetch('/maxac?v='+v+'&save=1')}"
-        "function bt(c){fetch('/bigtext?v='+(c?1:0)+'&save=1')}"
-        "function ro(v){fetch('/rotate?v='+v+'&save=1')}"
-        "function u(v){fetch('/units?v='+v+'&save=1')}"
-        "function al(v){fetch('/alerts?mode='+v+'&save=1')}"
-        "function px(v){fetch('/alerts?prox='+v+'&save=1')}"
-        "function gp(c){fetch('/gps?v='+(c?1:0)+'&save=1')}"
+        "function G(p){fetch(p,{headers:{'" WEB_PAGE_HDR "':'1'}})}"
+        "function b(v,s){G('/bright?v='+v+(s?'&save=1':''))}"
+        "function v(x,s){G('/vol?v='+x+(s?'&save=1':''))}"
+        "function m(c){G('/vol?mute='+(c?1:0)+'&save=1')}"
+        "function t(){G('/vol?test=1')}"
+        "function d(v){G('/idle?v='+v+'&save=1')}"
+        "function fd(c){G('/fdsleep?v='+(c?1:0)+'&save=1')}"
+        "function sw(c){G('/sweep?v='+(c?1:0)+'&save=1')}"
+        "function ap(c){G('/airports?v='+(c?1:0)+'&save=1')}"
+        "function hg(c){G('/ground?v='+(c?1:0)+'&save=1')}"
+        "function ma(v){G('/altmin?v='+v+'&save=1')}"
+        "function mb(v){G('/altmax?v='+v+'&save=1')}"
+        "function mo(c){G('/milonly?v='+(c?1:0)+'&save=1')}"
+        "function tl(v){G('/trail?v='+v+'&save=1')}"
+        "function mx(v){G('/maxac?v='+v+'&save=1')}"
+        "function bt(c){G('/bigtext?v='+(c?1:0)+'&save=1')}"
+        "function ro(v){G('/rotate?v='+v+'&save=1')}"
+        "function u(v){G('/units?v='+v+'&save=1')}"
+        "function al(v){G('/alerts?mode='+v+'&save=1')}"
+        "function px(v){G('/alerts?prox='+v+'&save=1')}"
+        "function gp(c){G('/gps?v='+(c?1:0)+'&save=1')}"
         // auto-pick the visitor's time zone from their browser clock (only if they haven't set one)
         "var TZSET=%d;(function(){if(TZSET)return;"
         "var d=new Date(),j=new Date(d.getFullYear(),0,1).getTimezoneOffset(),"
@@ -631,24 +692,43 @@ static void handleRoot() {
     g_web.send(200, "text/html", buf);
 }
 
+// Nothing saved and no restart when an input is invalid: the browser shows this short
+// error page instead of the device rebooting centred on (0,0).
+static void sendSaveError(const char *field) {
+    String body = "<body style='background:#06100a;color:#ffb23c;font-family:sans-serif;padding:24px'>"
+                  "Not saved: <b>";
+    body += field;
+    body += "</b> must be a number like 38.8409 (dot or comma). "
+            "<a href='/' style='color:#1dff86'>Back to settings</a></body>";
+    g_web.send(400, "text/html", body);
+}
+
 static void handleSave() {
-    Preferences p;
-    p.begin("capsuleradar", false);
-    // Reject out-of-range coordinates so a typo can't leave the radar unusable.
+    if (refuseIfCrossSite()) return;
+    // Validate EVERYTHING first, write only if all fields pass. String::toDouble() used
+    // to accept "" (0) and "38,84" (38) — both inside the valid range, both saved.
+    double lat = 0.0, lon = 0.0, range = 0.0;
     if (g_web.hasArg("lat")) {
-        const double lat = g_web.arg("lat").toDouble();
-        if (lat >= -90.0 && lat <= 90.0) p.putDouble("homeLat", lat);
+        if (!parseDoubleStrict(g_web.arg("lat").c_str(), &lat)) return sendSaveError("latitude");
+        if (lat < -90.0 || lat > 90.0)          return sendSaveError("latitude (must be -90..90)");
     }
     if (g_web.hasArg("lon")) {
-        const double lon = g_web.arg("lon").toDouble();
-        if (lon >= -180.0 && lon <= 180.0) p.putDouble("homeLon", lon);
+        if (!parseDoubleStrict(g_web.arg("lon").c_str(), &lon)) return sendSaveError("longitude");
+        if (lon < -180.0 || lon > 180.0)        return sendSaveError("longitude (must be -180..180)");
     }
-    if (g_web.hasArg("range")) p.putFloat("rangeKm", g_web.arg("range").toFloat());
+    if (g_web.hasArg("range")) {
+        if (!parseDoubleStrict(g_web.arg("range").c_str(), &range)) return sendSaveError("display range");
+    }
+    const int tzIdx = g_web.hasArg("tz") ? g_web.arg("tz").toInt() : -1;
+
+    Preferences p;
+    p.begin("capsuleradar", false);
+    if (g_web.hasArg("lat"))   p.putDouble("homeLat", lat);
+    if (g_web.hasArg("lon"))   p.putDouble("homeLon", lon);
+    // range: stored on the preset ladder — never 0 (divides by zero in geo::projectToScreen)
+    if (g_web.hasArg("range")) p.putFloat("rangeKm", snapRangeKm((float)range));
     if (g_web.hasArg("theme")) p.putInt("theme", g_web.arg("theme").toInt());
-    if (g_web.hasArg("tz")) {
-        const int i = g_web.arg("tz").toInt();
-        if (i >= 0 && i < TZOPTS_N) p.putString("tz", TZOPTS[i].tz);
-    }
+    if (tzIdx >= 0 && tzIdx < TZOPTS_N) p.putString("tz", TZOPTS[tzIdx].tz);
     p.end();
     g_web.send(200, "text/html",
         "<meta http-equiv=refresh content='4;url=/'><body style='background:#06100a;color:#1dff86;"
@@ -658,6 +738,7 @@ static void handleSave() {
 }
 
 static void handleWifi() {
+    if (refuseIfCrossSite()) return;
     g_web.send(200, "text/html",
         "<body style='background:#06100a;color:#ffb23c;font-family:sans-serif;padding:24px'>"
         "WiFi reset. Connect to the <b>CapsuleRadar-Setup</b> network to reconfigure.</body>");
@@ -680,6 +761,7 @@ static void handleWifi() {
 }
 
 static void handleBright() {
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_brightnessDay = constrain((int)g_web.arg("v").toInt(), 5, 255);  // floor 5: 0 looks like a dead board
         applyBrightness();
@@ -694,6 +776,7 @@ static void handleBright() {
 }
 
 static void handleVol() {
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v"))    { g_volume = constrain((int)g_web.arg("v").toInt(), 0, 100); audio_set_volume(g_volume); }
     if (g_web.hasArg("mute")) { g_muted = g_web.arg("mute").toInt() != 0; audio_set_muted(g_muted); }
     if (g_web.hasArg("save")) {
@@ -711,6 +794,7 @@ static void handleVol() {
 }
 
 static void handleAlerts() {   // what triggers the alert sound (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("mode")) g_alertMode   = constrain((int)g_web.arg("mode").toInt(), 0, 2);
     if (g_web.hasArg("prox")) {
         g_proximityKm = g_web.arg("prox").toFloat();   // km (0 = off)
@@ -728,6 +812,7 @@ static void handleAlerts() {   // what triggers the alert sound (live)
 }
 
 static void handleIdle() {   // idle auto-dim timeout (seconds; 0 = never)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         const long s = g_web.arg("v").toInt();
         g_idleDimMs = (s <= 0) ? 0 : (uint32_t)s * 1000;
@@ -742,6 +827,7 @@ static void handleIdle() {   // idle auto-dim timeout (seconds; 0 = never)
 }
 
 static void handleUnits() {   // measurement units preset (live re-render)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_units = constrain((int)g_web.arg("v").toInt(), 0, 2);
         ui_set_units(g_units);
@@ -758,6 +844,7 @@ static void handleUnits() {   // measurement units preset (live re-render)
 }
 
 static void handleSweep() {   // show/hide the rotating sweep line (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_showSweep = g_web.arg("v").toInt() != 0;
         radar::setSweepEnabled(g_showSweep);          // loop()/core 1: safe to touch LVGL
@@ -772,6 +859,7 @@ static void handleSweep() {   // show/hide the rotating sweep line (live)
 }
 
 static void handleTrail() {   // aircraft trail length 0/1/2/3 (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_trailLen = constrain((int)g_web.arg("v").toInt(), 0, 3);
         radar::setTrailLength(g_trailLen);
@@ -786,6 +874,7 @@ static void handleTrail() {   // aircraft trail length 0/1/2/3 (live)
 }
 
 static void handleAltMin() {   // minimum-altitude feed filter, ft (applies from the next poll)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_minAltFt = constrain((int)g_web.arg("v").toInt(), 0, 60000);
         g_adsb.setMinAltFt((float)g_minAltFt);
@@ -800,6 +889,7 @@ static void handleAltMin() {   // minimum-altitude feed filter, ft (applies from
 }
 
 static void handleAltMax() {   // maximum-altitude feed filter, ft (applies from the next poll)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_maxAltFt = constrain((int)g_web.arg("v").toInt(), 0, 60000);
         g_adsb.setMaxAltFt((float)g_maxAltFt);
@@ -814,6 +904,7 @@ static void handleAltMax() {   // maximum-altitude feed filter, ft (applies from
 }
 
 static void handleMilOnly() {   // military-only feed filter (applies from the next poll)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_milOnly = g_web.arg("v").toInt() != 0;
         g_adsb.setMilitaryOnly(g_milOnly);
@@ -828,6 +919,7 @@ static void handleMilOnly() {   // military-only feed filter (applies from the n
 }
 
 static void handleBigText() {   // accessibility: large fonts. Fonts are baked at UI creation,
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {    // so persist the flag and reboot cleanly to apply it.
         g_bigText = g_web.arg("v").toInt() != 0;
         Preferences p;
@@ -840,6 +932,7 @@ static void handleBigText() {   // accessibility: large fonts. Fonts are baked a
 }
 
 static void handleMaxAc() {   // max aircraft drawn on the scope (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_maxAc = constrain((int)g_web.arg("v").toInt(), 1, ADSB_MAX_AIRCRAFT);
         radar::setMaxOnScreen(g_maxAc);
@@ -854,6 +947,7 @@ static void handleMaxAc() {   // max aircraft drawn on the scope (live)
 }
 
 static void handleAirports() {   // show/hide airport markers (live)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_showAirports = g_web.arg("v").toInt() != 0;
         radar::setAirportsEnabled(g_showAirports);
@@ -868,6 +962,7 @@ static void handleAirports() {   // show/hide airport markers (live)
 }
 
 static void handleFdSleep() {   // face-down sleep (screen off when flipped over) on/off
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_fdSleep = g_web.arg("v").toInt() != 0;
         if (g_web.hasArg("save")) {
@@ -881,6 +976,7 @@ static void handleFdSleep() {   // face-down sleep (screen off when flipped over
 }
 
 static void handleGround() {   // hide/show on-ground aircraft (applies from the next feed poll)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_hideGround = g_web.arg("v").toInt() != 0;
         g_adsb.setHideGround(g_hideGround);
@@ -895,6 +991,7 @@ static void handleGround() {   // hide/show on-ground aircraft (applies from the
 }
 
 static void handleRotate() {   // arbitrary clockwise display rotation, applied live
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_rotation = constrain((int)g_web.arg("v").toInt(), 0, 359);
         display::setRotation((uint16_t)g_rotation);
@@ -910,6 +1007,7 @@ static void handleRotate() {   // arbitrary clockwise display rotation, applied 
 }
 
 static void handleGps() {   // auto-set the centre point from the LC76G GPS (-G variant)
+    if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
         g_useGps = g_web.arg("v").toInt() != 0;
         if (g_web.hasArg("save")) {
@@ -948,7 +1046,7 @@ static void handleUpdatePage() {
         "var x=new XMLHttpRequest(),fd=new FormData();fd.append('f',f);"
         "document.getElementById('bar').style.display='block';"
         "x.upload.onprogress=function(e){if(e.lengthComputable)document.getElementById('fill').style.width=(e.loaded/e.total*100)+'%'};"
-        "x.onload=function(){document.getElementById('msg').innerText=x.responseText+' - rebooting...'};"
+        "x.onload=function(){var t=x.responseText;document.getElementById('msg').innerText=t=='OK'?t+' - rebooting...':t;};"
         "x.onerror=function(){document.getElementById('msg').innerText='Upload failed'};"
         "x.open('POST','/update');x.send(fd);}</script></body></html>");
 }
@@ -956,13 +1054,27 @@ static void handleUpdatePage() {
 static void handleUpdateUpload() {
     HTTPUpload &up = g_web.upload();
     if (up.status == UPLOAD_FILE_START) {
+        g_updateDone = false;
+        g_updateBlocked = requestCrossSite();   // can't answer from here: 403 goes out on completion
+        if (g_updateBlocked) { Serial.println("[update] upload refused (cross-site)"); return; }
         Serial.printf("[update] start: %s\n", up.filename.c_str());
+        // An earlier upload that never reached END (page closed, WiFi drop) leaves Update
+        // "running"; begin() then fails and EVERY later upload bricks at 0 % until a
+        // reboot. Abort any stale session first, then start clean.
+        if (Update.isRunning()) Update.abort();
         if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
     } else if (up.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+        if (!g_updateBlocked && Update.isRunning() &&
+            Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
     } else if (up.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) Serial.printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
+        if (g_updateBlocked) return;           // refused above: nothing to finish
+        g_updateDone = Update.end(true);
+        if (g_updateDone) Serial.printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
         else Update.printError(Serial);
+    } else if (up.status == UPLOAD_FILE_ABORTED) {
+        // The browser gave up mid-stream. Free the writer so the NEXT upload can begin.
+        Update.abort();
+        Serial.println("[update] upload aborted");
     }
 }
 
@@ -1117,12 +1229,20 @@ void setup() {
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/update", HTTP_POST,
         []() {
-            const bool ok = !Update.hasError();
+            // Check the request itself too: a POST with no file part never reaches the
+            // upload handler, and used to answer "OK" and reboot the device.
+            const bool refused = g_updateBlocked || requestCrossSite();
+            const bool ok = !refused && g_updateDone;
+            g_updateBlocked = g_updateDone = false;
+            if (refused) { g_web.send(403, "text/plain", "cross-site request rejected"); return; }
             g_web.send(200, "text/plain", ok ? "OK" : "FAIL");
             delay(800);
             if (ok) ESP.restart();
         },
         handleUpdateUpload);
+    // The CSRF guards read Sec-Fetch-Site / Origin / X-Radar; make the server collect them.
+    static const char *WEB_GUARD_HDRS[] = {"Sec-Fetch-Site", "Origin", WEB_PAGE_HDR};
+    g_web.collectHeaders(WEB_GUARD_HDRS, sizeof(WEB_GUARD_HDRS) / sizeof(WEB_GUARD_HDRS[0]));
     g_web.begin();
 
     Serial.println("setup done");
