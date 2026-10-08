@@ -59,29 +59,51 @@ valid contact info"*), which is why the UA must carry a project link.
 
 ## Provider pacing (how the firmware behaves)
 Providers are tried in order and paced **individually**:
-- **403** — a policy refusal (needs approval, or a rejected User-Agent). Parked for 15 min;
-  retrying it every poll only burns requests and pushes the others over their limits.
+- **403** — a policy refusal (needs approval, or a rejected User-Agent). Parked for 15 min,
+  doubling up to 6 h; retrying it every poll only burns requests and pushes the others over
+  their limits.
 - **429** — too fast. An adaptive minimum spacing doubles on each 429 and eases back after a
   run of successes. An explicit `Retry-After` wins.
 - **200 with no aircraft array** — the response parsed but is unusable (a provider changed its
   payload shape, or the chunked-encoding trap below). Same backoff as a 429: without it such a
   provider is re-asked every poll forever, which is exactly the loop that hid the adsb.fi
   chunking bug.
+- **No answer at all** (connect, TLS or read timeout) — the first one is free; from the second
+  in a row the provider waits a doubling gap (4 s up to 60 s), so one dead host cannot
+  monopolise the poll budget. The gap clears on the provider's first usable answer, so a short
+  internet outage does not leave the feed slow afterwards. While **every** provider is silent
+  (parked, or failing without an answer) the gap is capped at 10 s
+  (`ADSB_SILENCE_OUTAGE_MAX_MS`), so after a network-wide outage the next poll is at most 10 s
+  late rather than up to a minute. As soon as any provider answers, the others wait their full
+  gap again; the 429 spacing is never capped.
 
 The policy lives in `src/adsb_pacing.h`, separate from the HTTP code so it can be driven on
 the host — `tests/adsb_pacing_test.cpp` exercises parking, backoff, easing, `Retry-After` and
 `millis()` rollover without hardware.
 
-The **self-heal watchdog** in `main.cpp` reboots the device after 180 s without a feed, on the
-assumption that the internal heap has fragmented and TLS can no longer allocate. A refusal is
-not that: a 403 arrives over a working TLS session, and a poll we deliberately paced never
-left the device. Both refresh the watchdog via `AdsbClient::lastResponseMs()` — otherwise a
-feed every provider refuses reboots the device every three minutes, and each boot asks all
-three of them again.
+The **self-heal watchdog** (`FeedWatchdog` in `src/feed_watchdog.h`, run by `adsb_task`) targets
+one failure: the internal heap fragmenting until TLS can no longer allocate. It restarts the device
+when the feed has been stuck for 180 s (`ADSB_STUCK_MS`) with WiFi up **and** the largest
+free internal heap block is below `ADSB_STUCK_MIN_LARGEST_BLOCK` (28 KB). Any completed HTTP
+exchange (`AdsbClient::lastResponseMs()`, so a 403 counts) and WiFi being down refresh it. A poll
+the pacer skipped does **not**: fast TLS failures open the silence gaps above, the poll skips
+inside them, and counting those skips kept the restart from ever coming. A feed stuck for any
+other reason — every provider refusing us, or the internet down behind a working WiFi — keeps the
+radar running with the amber HUD warning instead of rebooting it every three minutes, but not
+forever: a backstop restarts the device regardless of the heap once WiFi has been up and no
+provider has answered for more than 30 minutes (`ADSB_STUCK_HARD_MS`). Any answer in that time
+resets the clock, so an outage that ends sooner never triggers it. The backstop's clock also
+stands still while **every** provider is parked by a refusal or `Retry-After`
+(`AdsbClient::allParked()`): that silence is our own, and the second 403 park (30 min) would
+otherwise end just after the backstop and reboot a refused device before it could knock again.
+`tests/feed_watchdog_test.cpp` drives the watchdog and the real pacer through these cases.
 
 Every HTTPS client sets `setHandshakeTimeout(TLS_HANDSHAKE_S)` (10 s). The core default is 120 s,
 so a server that accepts TCP but never finishes the handshake would hold the network task for two
 minutes, and two such hangs in a row outlast the 180 s watchdog with nothing wrong on the device.
+The JSON documents and the mbedTLS buffers themselves live in PSRAM (the PSRAM `JsonDocument`
+allocator in `adsb_client.cpp` and `mbedtls_platform_set_calloc_free()` in `main.cpp`), so TLS
+traffic cannot fragment the internal heap the handshake needs.
 
 Set the `User-Agent` with `HTTPClient::setUserAgent()`. **`addHeader("User-Agent", ...)` is
 silently ignored** — Arduino keeps that header on an internal "handled by code" list, so the

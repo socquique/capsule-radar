@@ -83,7 +83,26 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define ADSB_SPACING_STEP_MS    4000UL      // first extra gap imposed after a 429
 #define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
 #define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down
+// While EVERY provider we may ask is silent (parked, or failing at the transport level),
+// the silence gap (ADSB_SPACING_STEP_MS doubling up to ADSB_SPACING_MAX_MS) is capped at
+// this. A network-wide outage then costs at most this long after the link returns, not a
+// minute; a provider that stays dead while another one answers still waits the full gap.
+// The 429 spacing is not capped. See AdsbPacer::cooling().
+#define ADSB_SILENCE_OUTAGE_MAX_MS 10000UL
 #define ADSB_FEED_STALE_MS     60000UL      // no successful fetch for this long -> HUD warning
+// The feed-stuck watchdog (FeedWatchdog in feed_watchdog.h) calls the feed stuck when WiFi
+// is up and no provider has answered for ADSB_STUCK_MS. It may then reboot only when the
+// largest free INTERNAL heap block is below ADSB_STUCK_MIN_LARGEST_BLOCK: a TLS handshake
+// needs a contiguous block of roughly this size (photo_client.cpp skips a whole photo fetch
+// below the same figure). Above it, a stuck feed is an internet outage, not heap
+// fragmentation — stay up, warn amber.
+#define ADSB_STUCK_MS         180000UL
+#define ADSB_STUCK_MIN_LARGEST_BLOCK 28000
+// Last resort, independent of the heap check: WiFi up and no provider has answered for
+// this long -> restart anyway. Covers a stuck feed whose cause the heap figure does not
+// show (a wedged network stack, a socket that never closes). An outage that ends sooner
+// never gets here: the first answer resets the clock.
+#define ADSB_STUCK_HARD_MS    1800000UL     // 30 min
 
 // ---------- Debug ----------
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial

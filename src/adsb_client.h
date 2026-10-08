@@ -38,6 +38,9 @@ public:
     // every boot asks all three providers again.
     uint32_t lastResponseMs() const { return _lastResponseMs; }
 
+    // True while every provider is parked (403 / Retry-After), i.e. we are deliberately asking nobody.
+    bool allParked() const { return _pacer.allParked(millis()); }
+
 private:
     // `slot` indexes both the provider table in adsb_client.cpp and the pacing state below.
     bool fetchFrom(int slot, std::vector<Aircraft>& out);
