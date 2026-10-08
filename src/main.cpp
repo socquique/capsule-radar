@@ -1277,7 +1277,19 @@ void loop() {
 
     // scheduled reboot after a fresh WiFi config (see setSaveConfigCallback)
     if (g_rebootAtMs && (int32_t)(millis() - g_rebootAtMs) >= 0) { delay(50); ESP.restart(); }
-    if (g_powerOffAtMs && (int32_t)(millis() - g_powerOffAtMs) >= 0) { g_powerOffAtMs = 0; battery_power_off(); }
+    if (g_powerOffAtMs && (int32_t)(millis() - g_powerOffAtMs) >= 0) {
+        g_powerOffAtMs = 0;
+        // The button lives on the Stats view, so the remembered view would bring the radar
+        // back up on Stats every time. A deliberate power-off starts again on the radar.
+        if (g_lastView != 0) {
+            g_lastView = 0;
+            Preferences q;
+            q.begin("capsuleradar", false);
+            q.putInt("lastview", 0);
+            q.end();
+        }
+        battery_power_off();
+    }
 
     // Car use: the saved WiFi often appears 30-60 s AFTER boot (vehicle hotspot). If we booted
     // into the portal despite having saved credentials, keep retrying them in the background;
