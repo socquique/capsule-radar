@@ -46,5 +46,7 @@ else
     echo "  run 'pio run -e esp32-s3-amoled-175' once to populate the library cache"
 fi
 
+run facedown_sleep -Isrc tests/facedown_sleep_test.cpp
+
 printf '\n%s\n' "$([ $rc -eq 0 ] && echo 'ALL HOST TESTS PASSED' || echo 'HOST TESTS FAILED')"
 exit $rc

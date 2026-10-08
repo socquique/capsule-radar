@@ -52,6 +52,12 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define LV_COLOR_DEPTH_BITS 16
 // LCD_COL_OFFSET / LCD_ROW_OFFSET / LCD_QSPI_HZ are panel-specific -> board header.
 #define BRIGHTNESS_DEFAULT  200            // 0..255, panel brightness via cmd 0x51
+// Face-down sleep (QMI8658, logic in facedown_sleep.h): the IMU is read every
+// FACEDOWN_CHECK_MS, and FACEDOWN_COUNT face-down readings in a row with no touch in between
+// turn the screen off (~1.6 s). Accelerometer Z at ±2 g full scale: 16384 LSB/g.
+#define FACEDOWN_CHECK_MS   400
+#define FACEDOWN_COUNT      4
+#define FACEDOWN_THRESHOLD  9000           // ~0.55 g past zero, on the side opposite the resting pose
 #define TZ_STR              "CET-1CEST,M3.5.0,M10.5.0/3"  // POSIX TZ (Spain) for local time/date
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch

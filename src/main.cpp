@@ -21,7 +21,8 @@
 #include "radar_view.h"
 #include "ui.h"
 #include "display.h"                  // M0: CO5300 + LVGL bring-up
-#include "imu_qmi8658.h"             // face-down sleep
+#include "imu_qmi8658.h"             // face-down sleep: accelerometer reads
+#include "facedown_sleep.h"          // face-down sleep: the decision
 #include "gps.h"                     // LC76G GNSS (-G variant only)
 #include "battery.h"                 // AXP2101 battery gauge
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
@@ -1256,18 +1257,15 @@ void loop() {
         }
     }
 
-    // face-down -> screen off (IMU); flip face-up to wake
+    // face-down -> screen off (IMU); flip face-up or touch to wake (see facedown_sleep.h)
     static uint32_t lastImu = 0;
-    static int fdCount = 0;
-    if (millis() - lastImu > 400) {
+    static FaceDownSleep faceDown;
+    if (millis() - lastImu > FACEDOWN_CHECK_MS) {
         lastImu = millis();
-        const int fd = imu_facedown();              // 1 down, 0 not, -1 read error
-        if (fd > 0)       { if (fdCount < 8) fdCount++; }
-        else if (fd == 0) fdCount = 0;              // -1 (I2C hiccup): leave the counter as-is
-        // tap-to-wake: a touch while dark means the pose detection is wrong (tilted mount,
-        // drifted baseline) — wake up and adopt the current pose as the new resting one.
-        if (g_asleep && display::inactiveMs() < 400) { fdCount = 0; imu_rebaseline(); }
-        const bool sleep = g_fdSleep && (fdCount >= 4);   // ~1.6 s face-down (web toggle)
+        int16_t az = 0;
+        const bool haveAz = imu_read_az(&az);
+        faceDown.update(haveAz, az, display::inactiveMs(), g_fdSleep);   // g_fdSleep: web toggle
+        const bool sleep = faceDown.asleep();
         const bool idle  = g_idleDimMs > 0 && display::inactiveMs() > g_idleDimMs;
         if (sleep != g_asleep || idle != g_idle) {
             g_asleep = sleep;
