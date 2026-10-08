@@ -56,6 +56,17 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch
 
+// ---------- Touch ----------
+// LVGL reads the touch panel only between frames, and a swipe redraws the whole screen on
+// every frame (~150-200 ms on the device). display.cpp also samples the panel between the
+// flush strips of a frame and replays the samples to LVGL in order (touch_queue.h).
+// At most one panel read per TOUCH_SAMPLE_MS between strips. Keep it at LVGL's read period
+// (LV_INDEV_DEF_READ_PERIOD in include/lv_conf.h): LVGL predicts a swipe's throw from the
+// movement per read, so denser samples shrink the throw and short flicks snap back.
+#define TOUCH_SAMPLE_MS         20
+#define TOUCH_NODATA_RELEASE_MS 100  // failed reads for this long while pressed count as a lift
+#define TOUCH_QUEUE_LEN         32   // samples held between two LVGL reads (a full frame adds ~10)
+
 // ---------- ADS-B API (free, non-commercial) ----------
 // Providers are tried in this order; each is paced independently (see AdsbClient).
 // All three return the same readsb shape (an "ac" array), but NOT the same URL path,

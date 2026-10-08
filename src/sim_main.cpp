@@ -15,6 +15,7 @@
 #include "config.h"
 #include "radar_view.h"
 #include "ui.h"
+#include "touch_queue.h"
 #include "route.h"
 #include "weather.h"
 #include "wx_radar.h"
@@ -34,8 +35,26 @@ static SDL_Window   *s_win = NULL;
 static SDL_Renderer *s_ren = NULL;
 static SDL_Texture  *s_tex = NULL;
 
+// Mouse acts as the touch input device (left button = press), through the same TouchQueue
+// path as the device (display.cpp): sampled between flush strips as well as when LVGL
+// reads, and replayed to LVGL in order.
+static TouchQueue s_touchQ;
+static Uint32     s_touchLastMs = 0;
+static bool       s_touchReplaying = false;
+
+static void sim_touch_sample(bool force) {
+    const Uint32 now = SDL_GetTicks();
+    if (!force && now - s_touchLastMs < TOUCH_SAMPLE_MS) return;
+    s_touchLastMs = now;
+    int x, y;
+    const Uint32 btn = SDL_GetMouseState(&x, &y);
+    if (btn & SDL_BUTTON(SDL_BUTTON_LEFT)) s_touchQ.add(TouchQueue::DOWN, (int16_t)x, (int16_t)y, now);
+    else                                   s_touchQ.add(TouchQueue::UP, 0, 0, now);
+}
+
 // LVGL -> SDL texture. Accumulate dirty areas, present once per refresh.
 static void sdl_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
+    sim_touch_sample(false);
     const int w = area->x2 - area->x1 + 1;
     const int h = area->y2 - area->y1 + 1;
     SDL_Rect r = { area->x1, area->y1, w, h };
@@ -48,15 +67,16 @@ static void sdl_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px)
     lv_disp_flush_ready(drv);
 }
 
-// Mouse acts as the touch input device (left button = press).
 static void sdl_mouse_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     (void)drv;
-    int x, y;
-    Uint32 btn = SDL_GetMouseState(&x, &y);
-    data->point.x = x;
-    data->point.y = y;
-    data->state = (btn & SDL_BUTTON(SDL_BUTTON_LEFT)) ? LV_INDEV_STATE_PRESSED
-                                                      : LV_INDEV_STATE_RELEASED;
+    if (!s_touchReplaying) sim_touch_sample(true);
+    TouchQueue::Sample s;
+    if (!s_touchQ.next(s)) s = s_touchQ.delivered();
+    data->point.x = s.x;
+    data->point.y = s.y;
+    data->state = s.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->continue_reading = !s_touchQ.empty();
+    s_touchReplaying = data->continue_reading;
 }
 
 // ---- mock ADS-B data (sim only): 6 aircraft near Dénia that drift along track --

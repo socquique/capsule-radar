@@ -45,14 +45,14 @@ bool touch_begin() {
     return true;
 }
 
-bool touch_read(uint16_t *ox, uint16_t *oy) {
+TouchRead touch_read(uint16_t *ox, uint16_t *oy) {
     uint8_t d[CST9217_DATA_LEN];
-    if (!cst_read_reg(CST9217_REG_DATA, d, CST9217_DATA_LEN)) return false;
-    if (d[6] != CST9217_ACK) return false;
+    if (!cst_read_reg(CST9217_REG_DATA, d, CST9217_DATA_LEN)) return TOUCH_NODATA;
+    if (d[6] != CST9217_ACK) return TOUCH_NODATA;  // a valid frame, touched or not, carries the ACK
 
     const uint8_t points = d[5] & 0x7F;
-    if (points == 0) return false;
-    if ((d[0] & 0x0F) != 0x06) return false;       // status of point 0 must be "down"
+    if (points == 0) return TOUCH_UP;
+    if ((d[0] & 0x0F) != 0x06) return TOUCH_UP;    // status of point 0 must be "down"
 
     uint16_t x = ((uint16_t)d[1] << 4) | (d[3] >> 4);
     uint16_t y = ((uint16_t)d[2] << 4) | (d[3] & 0x0F);
@@ -64,7 +64,7 @@ bool touch_read(uint16_t *ox, uint16_t *oy) {
 
     *ox = x;
     *oy = y;
-    return true;
+    return TOUCH_DOWN;
 }
 
 #endif  // TOUCH_DRIVER_CST9217
