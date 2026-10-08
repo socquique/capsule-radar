@@ -224,6 +224,52 @@ static int s_rangeIdx = -1;
 static float s_rangeKm = RANGE_KM_DEFAULT;   // current display range (km), for the stats view
 static void (*s_rangeCb)(float) = nullptr;
 static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
+static lv_obj_t *s_offBtn = nullptr, *s_offLbl = nullptr;
+static void (*s_poweroffCb)(void) = nullptr;
+static uint32_t s_offT0 = 0;
+static bool s_offFired = false;
+static lv_timer_t *s_offRestoreTimer = nullptr;
+
+// The button exists only on boards that can actually power off: it stays hidden until a
+// non-null callback is registered (null hides it again).
+void ui_set_poweroff_cb(void (*cb)(void)) {
+    s_poweroffCb = cb;
+    if (!s_offBtn) return;
+    if (cb) lv_obj_clear_flag(s_offBtn, LV_OBJ_FLAG_HIDDEN);
+    else   lv_obj_add_flag(s_offBtn, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Power off needs a 1.5 s HOLD so a swipe or stray tap can't turn the radar off.
+#define POWEROFF_HOLD_MS 1500
+// If the radar is still running a few seconds after "Powering off", the shutdown didn't
+// happen (e.g. the PMIC refused): go back to the hold prompt so the user isn't stuck.
+#define POWEROFF_RESTORE_MS 5000
+static void poweroff_restore_cb(lv_timer_t *t) {
+    s_offRestoreTimer = nullptr;
+    lv_timer_del(t);
+    s_offFired = false;
+    if (s_offLbl) lv_label_set_text(s_offLbl, LV_SYMBOL_POWER " Hold to power off");
+}
+
+static void poweroff_cb(lv_event_t *e) {
+    const lv_event_code_t c = lv_event_get_code(e);
+    if (!s_offLbl) return;
+    if (c == LV_EVENT_PRESSED) {
+        if (s_offRestoreTimer) { lv_timer_del(s_offRestoreTimer); s_offRestoreTimer = nullptr; }
+        s_offT0 = lv_tick_get(); s_offFired = false;
+        lv_label_set_text(s_offLbl, "Keep holding...");
+    } else if (c == LV_EVENT_PRESSING && !s_offFired) {
+        if (lv_tick_elaps(s_offT0) >= POWEROFF_HOLD_MS) {
+            s_offFired = true;
+            lv_label_set_text(s_offLbl, "Powering off");
+            if (s_poweroffCb) s_poweroffCb();
+            s_offRestoreTimer = lv_timer_create(poweroff_restore_cb, POWEROFF_RESTORE_MS, nullptr);
+            lv_timer_set_repeat_count(s_offRestoreTimer, 1);
+        }
+    } else if ((c == LV_EVENT_RELEASED || c == LV_EVENT_PRESS_LOST) && !s_offFired) {
+        lv_label_set_text(s_offLbl, LV_SYMBOL_POWER " Hold to power off");
+    }
+}
 
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
 
@@ -897,6 +943,25 @@ void ui_create(void) {
     lv_obj_set_style_text_align(s_statsNet, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_statsNet, "");
     lv_obj_align(s_statsNet, LV_ALIGN_CENTER, 0, 132);
+
+    // power off (hold) -- top of the Stats view, under the title
+    s_offBtn = lv_btn_create(sp);
+    lv_obj_set_size(s_offBtn, 210, 40);
+    lv_obj_set_ext_click_area(s_offBtn, 12);
+    lv_obj_align(s_offBtn, LV_ALIGN_CENTER, 0, -150);
+    lv_obj_set_style_radius(s_offBtn, 18, 0);
+    lv_obj_set_style_bg_color(s_offBtn, UI_PANEL, 0);
+    lv_obj_set_style_bg_opa(s_offBtn, 225, 0);
+    lv_obj_set_style_border_color(s_offBtn, UI_EMERG, 0);
+    lv_obj_set_style_border_width(s_offBtn, 1, 0);
+    lv_obj_clear_flag(s_offBtn, LV_OBJ_FLAG_SCROLL_CHAIN);
+    lv_obj_add_event_cb(s_offBtn, poweroff_cb, LV_EVENT_ALL, NULL);
+    s_offLbl = lv_label_create(s_offBtn);
+    lv_label_set_text(s_offLbl, LV_SYMBOL_POWER " Hold to power off");
+    lv_obj_set_style_text_font(s_offLbl, F14(), 0);
+    lv_obj_set_style_text_color(s_offLbl, UI_EMERG, 0);
+    lv_obj_center(s_offLbl);
+    lv_obj_add_flag(s_offBtn, LV_OBJ_FLAG_HIDDEN);   // shown only when ui_set_poweroff_cb(non-null)
 
     lv_obj_t *ver = lv_label_create(sp);            // firmware version (so users can tell what's flashed)
     lv_obj_set_style_text_font(ver, F12(), 0);
