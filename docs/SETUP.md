@@ -33,7 +33,10 @@ only need this if you are porting to a third board. See "Adding another board" i
 LVGL needs `lv_conf.h` reachable on the include path. Easiest: copy from the Waveshare `06_LVGL_Widgets` demo (it's already tuned for this panel/color depth), set `LV_COLOR_DEPTH 16`, enable PSRAM draw buffers, and keep the QMI8658/touch indev wiring from demos `03/04`.
 
 ## WiFi & location
-No secrets are committed. On first boot the captive portal collects SSID/password and home lat/lon. Defaults in `src/config.h` are Dénia (38.8409, 0.1059) — change as needed.
+No secrets are committed. On first boot the captive portal collects the SSID/password only.
+The radar centre lat/lon (and range, theme, units, brightness…) is then set on the device's
+web page at `http://capsuleradar.local/` — it has a map picker. Defaults in `src/config.h`
+are Dénia (38.8409, 0.1059) — change as needed.
 
 ## HTTPS note
 airplanes.live is HTTPS. For a hobby build, `WiFiClientSecure::setInsecure()` is fine. For production, pin the root CA. The choice is flagged in `adsb_client.cpp`.
