@@ -145,14 +145,21 @@ static void adsb_task(void*) {
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
         }
         wasConnected = conn;
-        // Self-heal: reboot only for a fragmented internal heap starving TLS, never for
-        // refusals or an internet outage behind working WiFi (see feed_watchdog.h).
+        // Self-heal: reboot at once for a fragmented internal heap starving TLS, and as a
+        // last resort after ADSB_STUCK_HARD_MS whatever the heap says. Not for refusals or
+        // a short internet outage behind working WiFi (see feed_watchdog.h).
         if (const uint32_t answeredMs = g_adsb.lastResponseMs()) watchdog.onAnswer(answeredMs);
-        switch (watchdog.check(conn, millis(), [] {
+        switch (watchdog.check(conn, millis(), g_adsb.allParked(), [] {
                     return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL); })) {
             case FeedWatchdog::RESTART:
                 Serial.printf("[adsb] feed stuck >%us and internal heap fragmented -> restarting to recover\n",
                               (unsigned)(ADSB_STUCK_MS / 1000));
+                delay(100);
+                ESP.restart();
+                break;
+            case FeedWatchdog::RESTART_LONG:
+                Serial.printf("[adsb] feed stuck >%u min with WiFi up -> restarting as a last resort\n",
+                              (unsigned)(ADSB_STUCK_HARD_MS / 60000UL));
                 delay(100);
                 ESP.restart();
                 break;

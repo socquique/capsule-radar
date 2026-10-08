@@ -24,6 +24,14 @@
 //          waits a doubling gap (the same 4..60 s steps as a 429), and the first usable
 //          response (onOk) clears that gap at once — silence, unlike a rate limit, ends
 //          the moment the provider answers.
+//          While EVERY provider we may ask is silent (parked, or failing without an
+//          answer) there is nobody to protect by waiting and nobody to fall back on, so
+//          the silence gap is capped at ADSB_SILENCE_OUTAGE_MAX_MS: after a network-wide
+//          outage the next poll comes within that, not up to a minute late. The moment
+//          any provider answers, the others' full gaps apply again, so a host that stays
+//          dead while another one works is still asked rarely. The cap is applied when
+//          the gap is checked (the doubling is stored uncapped), and the 429 spacing is
+//          never capped.
 //
 // All time comparisons are millis()-rollover-safe: cooldowns compare unsigned remaining
 // time BOUNDED by the longest park we ever impose, and spacing uses unsigned elapsed
@@ -39,23 +47,12 @@ class AdsbPacer {
 public:
     // Skip this provider for now? True while it is parked, or still inside its spacing window.
     bool cooling(int slot, uint32_t nowMs) const {
-        // _cooldownUntil == 0 means "never parked". It cannot be treated as a plain
-        // deadline: with nowMs just below the 2^32 wrap it would read as "parked until
-        // right after the wrap", silencing every fresh provider for the last stretch
-        // before rollover. (A real park stores 0 only if its deadline lands exactly on
-        // the wrap; the cost there is one extra request, not a hang.)
-        if (_cooldownUntil[slot] != 0) {
-            // A park counts only while its remaining time fits inside the longest park
-            // we ever impose. Retry-After is clamped to the same bound in onRateLimited,
-            // so a live park always passes; a deadline from before the last rollover
-            // reads as a huge remaining time and is ignored instead of parking the
-            // provider (the old signed compare parked everyone at ~24.85 days uptime).
-            const uint32_t remaining = _cooldownUntil[slot] - nowMs;
-            if (remaining != 0 && remaining <= ADSB_COOLDOWN_403_MAX_MS) return true;
-        }
+        if (parked(slot, nowMs)) return true;
         // Unsigned elapsed: a signed compare read an attempt older than 2^31 ms as
         // "just happened" after rollover and cooled the provider forever.
-        const uint32_t gap = _spacingMs[slot] > _silenceMs[slot] ? _spacingMs[slot] : _silenceMs[slot];
+        uint32_t silence = _silenceMs[slot];
+        if (silence > ADSB_SILENCE_OUTAGE_MAX_MS && everyoneSilent(nowMs)) silence = ADSB_SILENCE_OUTAGE_MAX_MS;
+        const uint32_t gap = _spacingMs[slot] > silence ? _spacingMs[slot] : silence;
         if (gap && nowMs - _lastAttemptMs[slot] < gap) return true;
         return false;
     }
@@ -145,7 +142,47 @@ public:
 
     uint32_t spacingMs(int slot) const { return _spacingMs[slot]; }
 
+    // Inside a 403 / Retry-After park?
+    bool parked(int slot, uint32_t nowMs) const {
+        // _cooldownUntil == 0 means "never parked". It cannot be treated as a plain
+        // deadline: with nowMs just below the 2^32 wrap it would read as "parked until
+        // right after the wrap", silencing every fresh provider for the last stretch
+        // before rollover. (A real park stores 0 only if its deadline lands exactly on
+        // the wrap; the cost there is one extra request, not a hang.)
+        if (_cooldownUntil[slot] == 0) return false;
+        // A park counts only while its remaining time fits inside the longest park
+        // we ever impose. Retry-After is clamped to the same bound in onRateLimited,
+        // so a live park always passes; a deadline from before the last rollover
+        // reads as a huge remaining time and is ignored instead of parking the
+        // provider (the old signed compare parked everyone at ~24.85 days uptime).
+        const uint32_t remaining = _cooldownUntil[slot] - nowMs;
+        return remaining != 0 && remaining <= ADSB_COOLDOWN_403_MAX_MS;
+    }
+
+    // True while EVERY provider is inside a park: nobody may be asked, so the feed's
+    // silence is our own doing, not a sign that the network stack is wedged
+    // (FeedWatchdog uses this to pause its long backstop).
+    bool allParked(uint32_t nowMs) const {
+        for (int s = 0; s < ADSB_PROVIDER_COUNT; ++s)
+            if (!parked(s, nowMs)) return false;
+        return true;
+    }
+
 private:
+    // True while no provider is answering: each one is parked or in a silence streak
+    // (_transportFails > 0, cleared by onOk), and at least one is in a streak. A provider
+    // that was only rate limited (429), answered with an unusable body, or was never asked
+    // does not count as silent. A 429 or a 200 is an answer, and a fresh provider is an
+    // untried fallback.
+    bool everyoneSilent(uint32_t nowMs) const {
+        bool anyStreak = false;
+        for (int s = 0; s < ADSB_PROVIDER_COUNT; ++s) {
+            if (_transportFails[s] > 0) anyStreak = true;
+            else if (!parked(s, nowMs)) return false;
+        }
+        return anyStreak;
+    }
+
     uint32_t backOff(int slot) {
         _okStreak[slot] = 0;
         uint32_t sp = _spacingMs[slot] ? _spacingMs[slot] * 2 : ADSB_SPACING_STEP_MS;

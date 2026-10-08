@@ -71,7 +71,11 @@ Providers are tried in order and paced **individually**:
 - **No answer at all** (connect, TLS or read timeout) — the first one is free; from the second
   in a row the provider waits a doubling gap (4 s up to 60 s), so one dead host cannot
   monopolise the poll budget. The gap clears on the provider's first usable answer, so a short
-  internet outage does not leave the feed slow afterwards.
+  internet outage does not leave the feed slow afterwards. While **every** provider is silent
+  (parked, or failing without an answer) the gap is capped at 10 s
+  (`ADSB_SILENCE_OUTAGE_MAX_MS`), so after a network-wide outage the next poll is at most 10 s
+  late rather than up to a minute. As soon as any provider answers, the others wait their full
+  gap again; the 429 spacing is never capped.
 
 The policy lives in `src/adsb_pacing.h`, separate from the HTTP code so it can be driven on
 the host — `tests/adsb_pacing_test.cpp` exercises parking, backoff, easing, `Retry-After` and
@@ -79,13 +83,19 @@ the host — `tests/adsb_pacing_test.cpp` exercises parking, backoff, easing, `R
 
 The **self-heal watchdog** (`FeedWatchdog` in `src/feed_watchdog.h`, run by `adsb_task`) targets
 one failure: the internal heap fragmenting until TLS can no longer allocate. It restarts the device
-only when the feed has been stuck for 180 s (`ADSB_STUCK_MS`) with WiFi up **and** the largest
+when the feed has been stuck for 180 s (`ADSB_STUCK_MS`) with WiFi up **and** the largest
 free internal heap block is below `ADSB_STUCK_MIN_LARGEST_BLOCK` (28 KB). Any completed HTTP
 exchange (`AdsbClient::lastResponseMs()`, so a 403 counts) and WiFi being down refresh it. A poll
 the pacer skipped does **not**: fast TLS failures open the silence gaps above, the poll skips
 inside them, and counting those skips kept the restart from ever coming. A feed stuck for any
 other reason — every provider refusing us, or the internet down behind a working WiFi — keeps the
-radar running with the amber HUD warning instead of rebooting it every three minutes.
+radar running with the amber HUD warning instead of rebooting it every three minutes, but not
+forever: a backstop restarts the device regardless of the heap once WiFi has been up and no
+provider has answered for more than 30 minutes (`ADSB_STUCK_HARD_MS`). Any answer in that time
+resets the clock, so an outage that ends sooner never triggers it. The backstop's clock also
+stands still while **every** provider is parked by a refusal or `Retry-After`
+(`AdsbClient::allParked()`): that silence is our own, and the second 403 park (30 min) would
+otherwise end just after the backstop and reboot a refused device before it could knock again.
 `tests/feed_watchdog_test.cpp` drives the watchdog and the real pacer through these cases.
 
 Every HTTPS client sets `setHandshakeTimeout(TLS_HANDSHAKE_S)` (10 s). The core default is 120 s,
