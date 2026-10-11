@@ -63,6 +63,7 @@ static void sdl_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px)
         SDL_RenderClear(s_ren);
         SDL_RenderCopy(s_ren, s_tex, NULL, NULL);
         SDL_RenderPresent(s_ren);
+        ui_frame_done();
     }
     lv_disp_flush_ready(drv);
 }

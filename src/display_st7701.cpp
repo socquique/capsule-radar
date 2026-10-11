@@ -766,7 +766,7 @@ static void set_draw_buf_size() {
 static void touch_sample(bool force);
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
     if (!s_panel || !s_fb[0]) {                 // headless (panel bring-up failed)
-        if (lv_disp_flush_is_last(drv)) s_frameCount++;
+        if (lv_disp_flush_is_last(drv)) { s_frameCount++; ui_frame_done(); }
         lv_disp_flush_ready(drv);
         return;
     }
@@ -778,7 +778,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
     touch_sample(false);
     if (!drv->full_refresh) {
         flush_area(area, px);
-        if (lv_disp_flush_is_last(drv)) s_frameCount++;
+        if (lv_disp_flush_is_last(drv)) { s_frameCount++; ui_frame_done(); }
         lv_disp_flush_ready(drv);
         return;
     }
@@ -819,6 +819,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
     touch_sample(false);
     s_back ^= 1;
     s_frameCount++;
+    ui_frame_done();
     lv_disp_flush_ready(drv);
 }
 
