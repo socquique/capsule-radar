@@ -95,7 +95,8 @@ static float dist_val(float km) {
 static const char *dist_unit(void) { return s_units == 0 ? "nm" : (s_units == 2 ? "mi" : "km"); }
 
 static float weather_temp(float c) { return s_units == 2 ? c * 1.8f + 32.0f : c; }
-static const char *weather_temp_unit(void) { return s_units == 2 ? "F" : "C"; }
+// "\xC2\xB0" is the UTF-8 degree sign; LVGL's built-in Montserrat fonts carry it (U+00B0).
+static const char *weather_temp_unit(void) { return s_units == 2 ? "\xC2\xB0" "F" : "\xC2\xB0" "C"; }
 static float weather_wind(float kmh) {
     if (s_units == 0) return kmh * 0.539957f;
     if (s_units == 2) return kmh * 0.621371f;

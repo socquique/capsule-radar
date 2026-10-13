@@ -104,6 +104,7 @@ static const struct { const char *label; const char *tz; int offMin; int dst; } 
     {"London / Lisbon",          "GMT0BST,M3.5.0/1,M10.5.0",          0, 1},
     {"Madrid / Paris / Berlin",  "CET-1CEST,M3.5.0,M10.5.0/3",       60, 1},
     {"Athens / Helsinki",        "EET-2EEST,M3.5.0/3,M10.5.0/4",     120, 1},
+    {"Istanbul / Moscow",        "<+03>-3",                          180, 0},
     {"New York (US Eastern)",    "EST5EDT,M3.2.0,M11.1.0",          -300, 1},
     {"Chicago (US Central)",     "CST6CDT,M3.2.0,M11.1.0",          -360, 1},
     {"Denver (US Mountain)",     "MST7MDT,M3.2.0,M11.1.0",          -420, 1},
