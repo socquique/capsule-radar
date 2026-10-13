@@ -42,13 +42,14 @@ bool touch_begin() {
     return true;
 }
 
-bool touch_read(uint16_t *ox, uint16_t *oy) {
+TouchRead touch_read(uint16_t *ox, uint16_t *oy) {
     uint8_t d[FT_DATA_LEN];
-    if (!ft_read_reg(FT_REG_DATA, d, FT_DATA_LEN)) return false;
+    if (!ft_read_reg(FT_REG_DATA, d, FT_DATA_LEN)) return TOUCH_NODATA;
 
     const uint8_t points = d[2] & 0x0F;
-    if (points == 0 || points > 5) return false;          // 0x0F = no valid data
-    if ((d[3] >> 6) == FT_EVT_LIFT_UP) return false;      // finger leaving, treat as released
+    if (points == 0) return TOUCH_UP;
+    if (points > 5) return TOUCH_NODATA;                  // 0x0F = no valid data: not a lift
+    if ((d[3] >> 6) == FT_EVT_LIFT_UP) return TOUCH_UP;   // finger leaving, treat as released
 
     uint16_t x = (uint16_t)((d[3] & 0x0F) << 8 | d[4]);
     uint16_t y = (uint16_t)((d[5] & 0x0F) << 8 | d[6]);
@@ -60,7 +61,7 @@ bool touch_read(uint16_t *ox, uint16_t *oy) {
 
     *ox = x;
     *oy = y;
-    return true;
+    return TOUCH_DOWN;
 }
 
 #endif  // TOUCH_DRIVER_FT3168

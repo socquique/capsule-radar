@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.4.8-tcas.12"   // TCAS beta branch; bump on release
+#define FW_VERSION "1.4.9-tcas.13"   // TCAS beta branch; bump on release
 
 // ---------- Home location (default: Dénia, Spain) ----------
 // Overridable at runtime via the captive portal (stored in NVS).
@@ -59,6 +59,17 @@ static const float RANGE_STEPS_TCAS_NM[] = {5.0f, 10.0f, 20.0f, 40.0f, 80.0f};
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch
 
+// ---------- Touch ----------
+// LVGL reads the touch panel only between frames, and a swipe redraws the whole screen on
+// every frame (~150-200 ms on the device). display.cpp also samples the panel between the
+// flush strips of a frame and replays the samples to LVGL in order (touch_queue.h).
+// At most one panel read per TOUCH_SAMPLE_MS between strips. Keep it at LVGL's read period
+// (LV_INDEV_DEF_READ_PERIOD in include/lv_conf.h): LVGL predicts a swipe's throw from the
+// movement per read, so denser samples shrink the throw and short flicks snap back.
+#define TOUCH_SAMPLE_MS         20
+#define TOUCH_NODATA_RELEASE_MS 100  // failed reads for this long while pressed count as a lift
+#define TOUCH_QUEUE_LEN         32   // samples held between two LVGL reads (a full frame adds ~10)
+
 // ---------- ADS-B API (free, non-commercial) ----------
 // Providers are tried in this order; each is paced independently (see AdsbClient).
 // All three return the same readsb shape (an "ac" array), but NOT the same URL path,
@@ -86,7 +97,26 @@ static const float RANGE_STEPS_TCAS_NM[] = {5.0f, 10.0f, 20.0f, 40.0f, 80.0f};
 #define ADSB_SPACING_STEP_MS    4000UL      // first extra gap imposed after a 429
 #define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
 #define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down
+// While EVERY provider we may ask is silent (parked, or failing at the transport level),
+// the silence gap (ADSB_SPACING_STEP_MS doubling up to ADSB_SPACING_MAX_MS) is capped at
+// this. A network-wide outage then costs at most this long after the link returns, not a
+// minute; a provider that stays dead while another one answers still waits the full gap.
+// The 429 spacing is not capped. See AdsbPacer::cooling().
+#define ADSB_SILENCE_OUTAGE_MAX_MS 10000UL
 #define ADSB_FEED_STALE_MS     60000UL      // no successful fetch for this long -> HUD warning
+// The feed-stuck watchdog (FeedWatchdog in feed_watchdog.h) calls the feed stuck when WiFi
+// is up and no provider has answered for ADSB_STUCK_MS. It may then reboot only when the
+// largest free INTERNAL heap block is below ADSB_STUCK_MIN_LARGEST_BLOCK: a TLS handshake
+// needs a contiguous block of roughly this size (photo_client.cpp skips a whole photo fetch
+// below the same figure). Above it, a stuck feed is an internet outage, not heap
+// fragmentation — stay up, warn amber.
+#define ADSB_STUCK_MS         180000UL
+#define ADSB_STUCK_MIN_LARGEST_BLOCK 28000
+// Last resort, independent of the heap check: WiFi up and no provider has answered for
+// this long -> restart anyway. Covers a stuck feed whose cause the heap figure does not
+// show (a wedged network stack, a socket that never closes). An outage that ends sooner
+// never gets here: the first answer resets the clock.
+#define ADSB_STUCK_HARD_MS    1800000UL     // 30 min
 
 // ---------- Debug ----------
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial

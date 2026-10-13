@@ -8,6 +8,7 @@
 #include "geo.h"
 #include "adsb_client.h"
 #include "snapshot_gate.h"
+#include "feed_watchdog.h"
 #include "route.h"
 #include "route_client.h"
 #include "photo.h"
@@ -31,6 +32,7 @@
 #include <WiFiManager.h>             // captive portal
 #include <Preferences.h>            // NVS (persist theme/settings)
 #include <time.h>                   // NTP/RTC clock + date
+#include <esp_sntp.h>               // SNTP sync callback: a REAL NTP fix (not just a plausible epoch)
 #include <WebServer.h>              // configuration web page
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
@@ -80,7 +82,7 @@ static int                   g_trailLen = 2;                         // aircraft
 static int                   g_maxAc = 20;                           // max aircraft drawn on the scope (web/NVS)
 static bool                  g_bigText = false;                      // accessibility: large fonts (web/NVS, applied at boot)
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
-static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
+static volatile bool         g_rtcSyncPending = false;               // SNTP synced: RTC should be rewritten on core 1
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
 static volatile bool         g_requery = false;                      // range changed -> adsb_task re-begins
 static float                 g_requeryKm = 0.0f;
@@ -128,7 +130,7 @@ static void adsb_task(void*) {
     uint32_t nextWeatherAt = UINT32_MAX;       // armed five seconds after WiFi connects
     uint32_t nextWxRadarAt = UINT32_MAX;
     uint32_t nextCloudImageAt = UINT32_MAX;
-    uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
+    FeedWatchdog watchdog(millis());         // self-heal: see feed_watchdog.h
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
@@ -144,19 +146,30 @@ static void adsb_task(void*) {
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
         }
         wasConnected = conn;
-        // self-heal: a long feed outage while WiFi is up usually means the internal heap
-        // fragmented and the TLS handshake can't allocate -> reboot to recover (settings persist).
-        // A provider that answers "403, not for you" is NOT that failure, and neither is a poll
-        // we deliberately paced: the stack is fine either way. Count any completed HTTP exchange
-        // as alive, or a feed that every provider refuses reboots the device every three
-        // minutes — and every boot asks all three of them again.
-        const uint32_t lastHttpMs = g_adsb.lastResponseMs();
-        if (lastHttpMs && (int32_t)(lastHttpMs - lastFeedOk) > 0) lastFeedOk = lastHttpMs;
-        if (!conn) lastFeedOk = millis();
-        else if (millis() - lastFeedOk > 180000UL) {
-            Serial.println("[adsb] feed stuck >180s with WiFi up -> restarting to recover");
-            delay(100);
-            ESP.restart();
+        // Self-heal: reboot at once for a fragmented internal heap starving TLS, and as a
+        // last resort after ADSB_STUCK_HARD_MS whatever the heap says. Not for refusals or
+        // a short internet outage behind working WiFi (see feed_watchdog.h).
+        if (const uint32_t answeredMs = g_adsb.lastResponseMs()) watchdog.onAnswer(answeredMs);
+        switch (watchdog.check(conn, millis(), g_adsb.allParked(), [] {
+                    return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL); })) {
+            case FeedWatchdog::RESTART:
+                Serial.printf("[adsb] feed stuck >%us and internal heap fragmented -> restarting to recover\n",
+                              (unsigned)(ADSB_STUCK_MS / 1000));
+                delay(100);
+                ESP.restart();
+                break;
+            case FeedWatchdog::RESTART_LONG:
+                Serial.printf("[adsb] feed stuck >%u min with WiFi up -> restarting as a last resort\n",
+                              (unsigned)(ADSB_STUCK_HARD_MS / 60000UL));
+                delay(100);
+                ESP.restart();
+                break;
+            case FeedWatchdog::LOG_STUCK:
+                Serial.printf("[adsb] feed stuck >%us with WiFi up (no internet?); heap OK, staying up\n",
+                              (unsigned)(ADSB_STUCK_MS / 1000));
+                break;
+            case FeedWatchdog::NONE:
+                break;
         }
         if (g_requery) {                          // display range changed (double-tap zoom)
             g_adsb.begin(g_settings.homeLat, g_settings.homeLon, g_requeryKm);
@@ -179,7 +192,7 @@ static void adsb_task(void*) {
                     failCount = 0;
                     g_feedOk = true;
                     const uint32_t receivedMs = millis();
-                    lastFeedOk = receivedMs;
+                    watchdog.onPoll(FeedWatchdog::FETCHED, receivedMs);
                     g_lastFeedOkMs = receivedMs;      // HUD: mark data as fresh
 
                     const bool publish = snapshotGate.shouldPublish(
@@ -201,14 +214,17 @@ static void adsb_task(void*) {
                         }
                     }
                 } else if (g_adsb.lastPollSkipped()) {
-                    // Every provider is parked or inside its spacing window: we chose not to
-                    // ask. Logging this each tick would bury the real errors, and counting it
-                    // would show an outage warning for our own politeness. Prolonged silence
-                    // still trips the warning, via the time check rather than a fail count.
+                    // Every provider is parked or inside its spacing/silence window: we chose
+                    // not to ask. Logging this each tick would bury the real errors, and
+                    // counting it would show an outage warning for our own politeness.
+                    // Prolonged silence still trips the warning, via the time check rather
+                    // than a fail count. Not proof of life for the watchdog: nothing was sent.
+                    watchdog.onPoll(FeedWatchdog::SKIPPED, nowMs);
                     if ((int32_t)(nowMs - g_adsb.lastOkMs()) > (int32_t)ADSB_FEED_STALE_MS)
                         g_feedOk = false;
                 } else {
                     Serial.println("[adsb] poll failed");
+                    watchdog.onPoll(FeedWatchdog::FAILED, nowMs);
                     if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
                 }
             }
@@ -371,7 +387,7 @@ static void saveTheme(int t) {
 static time_t utc_to_time(struct tm *utc) {
     setenv("TZ", "UTC0", 1); tzset();
     const time_t t = mktime(utc);
-    setenv("TZ", TZ_STR, 1); tzset();   // restore local TZ for getLocalTime()
+    setenv("TZ", g_tz.c_str(), 1); tzset();   // restore the SAVED zone, not the Spain default
     return t;
 }
 
@@ -1041,9 +1057,15 @@ void setup() {
     gps_set_idle_hook(display::sweepTick);   // keep the sweep moving during GPS reads (it never touches I2C)
     battery_enable_codec_rail();   // power the ES8311 analog rail before audio init
 
-    setenv("TZ", TZ_STR, 1); tzset();   // local time for display even before NTP
+    setenv("TZ", g_tz.c_str(), 1); tzset();   // SAVED zone (not the Spain default): right clock before NTP
     rtc_begin();
     rtc_seed_clock();                   // offline clock/date from the PCF85063
+    // The system clock may be RTC-seeded (looks valid, might drift). Only a real SNTP
+    // sync may write the RTC back — the callback flags each sync, the 5 s tick (core 1)
+    // does the I2C write, at most hourly.
+    sntp_set_time_sync_notification_cb([](struct timeval *tv) {
+        g_rtcSyncPending = true;   // SNTP task context: flag only, no I2C here
+    });
     if (audio_begin()) {                // ES8311 alert pings (no-op if codec absent)
         audio_set_volume(g_volume);
         audio_set_muted(g_muted);
@@ -1124,6 +1146,8 @@ void setup() {
         },
         handleUpdateUpload);
     g_web.begin();
+
+    applyBrightness();   // display::begin() opens at BRIGHTNESS_DEFAULT; honour the saved value
 
     Serial.println("setup done");
 }
@@ -1231,7 +1255,10 @@ void loop() {
         ui_set_feed_source(g_adsb.lastHost());   // Stats "Feed" line: who served the last data
         const bool bpresent = battery_present();
         ui_set_battery(battery_percent(), battery_charging(), bpresent);
-        g_onBattery = bpresent && !battery_charging();
+        // "On battery" must mean USB is absent, not "not charging": isCharging() goes
+        // false once the battery is FULL, which used to slow polling to 5 s on a
+        // USB-tethered, fully charged device.
+        g_onBattery = bpresent && !battery_vbus_in();
         // GPS HUD/Stats: 0 = off/no module (hidden), 1 = acquiring, 2 = fix
         const int gpsState = (!g_useGps || !gps_present()) ? 0 : (gps_has_fix() ? 2 : 1);
         ui_set_gps(gpsState, gps_satellites(), gps_altitude_m());
@@ -1244,12 +1271,20 @@ void loop() {
         } else {
             g_settings.rotationDeg = 0.0;
         }
-        // once NTP has a real fix, persist it to the RTC (core 1 only)
-        if (!g_rtcSynced && time(nullptr) > 1700000000L) {
+        // Write the RTC only after a REAL SNTP sync (flagged by the callback in setup),
+        // and at most hourly — the boot clock is RTC-seeded and looks valid too, which
+        // used to let the 5 s tick write drift right back over a good time source.
+        static uint32_t lastRtcWriteMs = 0;
+        if (g_rtcSyncPending &&
+            (lastRtcWriteMs == 0 || millis() - lastRtcWriteMs >= 3600000UL)) {
             time_t now = time(nullptr);
             struct tm utc;
             gmtime_r(&now, &utc);
-            if (rtc_write(&utc)) { g_rtcSynced = true; Serial.println("[rtc] saved NTP time"); }
+            if (now > 1700000000L && rtc_write(&utc)) {   // sanity: a synced clock is past 2023
+                g_rtcSyncPending = false;                 // cleared only on success: retry on I2C error
+                lastRtcWriteMs = millis();
+                Serial.println("[rtc] saved NTP time");
+            }
         }
         // GPS auto-location (-G variant): re-centre the radar when the fix moves enough.
         if (g_useGps) {

@@ -169,6 +169,15 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
             if (sp)
                 Serial.printf("[adsb] %s rate-limited; spacing requests %us apart\n",
                               host, (unsigned)(sp / 1000));
+        } else if (code <= 0) {
+            // No answer at all (connect refused, TLS, read timeout). Until this branch
+            // existed the pacer ignored such failures, so a silent provider was re-asked
+            // every poll at its full connect+TLS timeout price and the radar only updated
+            // as fast as the surviving providers answered.
+            const uint32_t sp = _pacer.onTransportFail(slot);
+            if (sp)
+                Serial.printf("[adsb] %s silent (HTTP %d); spacing requests %us apart\n",
+                              host, code, (unsigned)(sp / 1000));
         }
         http.end(); return false;
     }

@@ -10,6 +10,7 @@
 #include "radar_view.h"
 #include "ui.h"
 #include "touch.h"
+#include "touch_queue.h"
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -501,11 +502,14 @@ static void flush_arbitrary(const lv_area_t *area) {
 //              internal-RAM one starves the mbedTLS handshake and kills the ADS-B feed.
 //   other: update the logical framebuffer and inverse-sample the rotated dirty bounds.
 static void compose_step();
+static void touch_sample(bool force);
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
     // Let the sweep tick between strips of a long LVGL frame (a full repaint takes ~200 ms).
     // Safe mid-frame: strips already flushed are in s_phys and on the panel; the rest of
     // s_phys still matches what the panel shows, so the composite is never wrong.
     compose_step();
+    // Sample the touch panel too: LVGL reads it only between frames (see touch_queue.h).
+    touch_sample(false);
     const int w = (int)(area->x2 - area->x1 + 1);
     const int h = (int)(area->y2 - area->y1 + 1);
     const uint16_t angle = s_rot;
@@ -574,42 +578,76 @@ static void rounder_cb(lv_disp_drv_t *drv, lv_area_t *area) {
     area->y2 |= 1;
 }
 
-// CST9217 touch -> LVGL pointer. LVGL keeps the last point on release.
+// CST9217 / FT3168 touch -> LVGL pointer, through TouchQueue (see touch_queue.h).
+static TouchQueue s_touchQ;
+static bool       s_touchOk = false;            // a touch controller is registered with LVGL
+static uint32_t   s_touchLastMs = 0;            // when the panel was last sampled
+static bool       s_touchReplaying = false;     // LVGL is calling back for the queued samples
+
+// Physical panel point -> logical UI point (inverse of the display rotation). False for the
+// black corners outside the logical UI at arbitrary angles.
+static bool touch_to_logical(uint16_t x, uint16_t y, int *ox, int *oy) {
+    int lx = x, ly = y;
+    const uint16_t angle = s_rot;
+    switch (angle) {
+        case 90:  lx = y;                        ly = SCREEN_H - 1 - x; break;
+        case 180: lx = SCREEN_W - 1 - x;         ly = SCREEN_H - 1 - y; break;
+        case 270: lx = SCREEN_W - 1 - y;         ly = x; break;
+        default:
+            if (angle != 0) {
+                const int relX2 = 2 * (int)x - (SCREEN_W - 1);
+                const int relY2 = 2 * (int)y - (SCREEN_H - 1);
+                const int64_t sx2q = (int64_t)(SCREEN_W - 1) * 65536
+                                   + (int64_t)s_rotCosQ16 * relX2
+                                   + (int64_t)s_rotSinQ16 * relY2;
+                const int64_t sy2q = (int64_t)(SCREEN_H - 1) * 65536
+                                   - (int64_t)s_rotSinQ16 * relX2
+                                   + (int64_t)s_rotCosQ16 * relY2;
+                lx = (int)((sx2q + 65536) >> 17);
+                ly = (int)((sy2q + 65536) >> 17);
+            }
+            break;
+    }
+    if (lx < 0 || lx >= SCREEN_W || ly < 0 || ly >= SCREEN_H) return false;
+    *ox = lx;
+    *oy = ly;
+    return true;
+}
+
+// Read the panel into the queue: always from the read callback (force), and at most every
+// TOUCH_SAMPLE_MS between flush strips. Both run on the LVGL task, never during the GPS
+// drain, which needs the I2C bus to itself (it ticks the compositor, not flush_cb).
+static void touch_sample(bool force) {
+    if (!s_touchOk) return;
+    const uint32_t now = millis();
+    if (!force && now - s_touchLastMs < TOUCH_SAMPLE_MS) return;
+    s_touchLastMs = now;
+    uint16_t x, y;
+    int lx, ly;
+    switch (touch_read(&x, &y)) {
+        case TOUCH_NODATA: s_touchQ.add(TouchQueue::NODATA, 0, 0, now); break;
+        case TOUCH_UP:     s_touchQ.add(TouchQueue::UP, 0, 0, now); break;
+        case TOUCH_DOWN:
+            if (touch_to_logical(x, y, &lx, &ly))
+                s_touchQ.add(TouchQueue::DOWN, (int16_t)lx, (int16_t)ly, now);
+            else
+                s_touchQ.add(TouchQueue::UP, 0, 0, now);   // black corners are outside the logical UI
+            break;
+    }
+}
+
 static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     (void)drv;
-    uint16_t x, y;
-    if (touch_read(&x, &y)) {
-        int lx = x, ly = y;                              // physical touch -> logical (inverse rotation)
-        const uint16_t angle = s_rot;
-        switch (angle) {
-            case 90:  lx = y;                        ly = SCREEN_H - 1 - x; break;
-            case 180: lx = SCREEN_W - 1 - x;         ly = SCREEN_H - 1 - y; break;
-            case 270: lx = SCREEN_W - 1 - y;         ly = x; break;
-            default:
-                if (angle != 0) {
-                    const int relX2 = 2 * (int)x - (SCREEN_W - 1);
-                    const int relY2 = 2 * (int)y - (SCREEN_H - 1);
-                    const int64_t sx2q = (int64_t)(SCREEN_W - 1) * 65536
-                                       + (int64_t)s_rotCosQ16 * relX2
-                                       + (int64_t)s_rotSinQ16 * relY2;
-                    const int64_t sy2q = (int64_t)(SCREEN_H - 1) * 65536
-                                       - (int64_t)s_rotSinQ16 * relX2
-                                       + (int64_t)s_rotCosQ16 * relY2;
-                    lx = (int)((sx2q + 65536) >> 17);
-                    ly = (int)((sy2q + 65536) >> 17);
-                }
-                break;
-        }
-        if (lx < 0 || lx >= SCREEN_W || ly < 0 || ly >= SCREEN_H) {
-            data->state = LV_INDEV_STATE_RELEASED;        // black corners are outside the logical UI
-            return;
-        }
-        data->point.x = (lv_coord_t)lx;
-        data->point.y = (lv_coord_t)ly;
-        data->state = LV_INDEV_STATE_PRESSED;
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
-    }
+    // Take the current state once per LVGL read, not again for each queued sample LVGL
+    // asks for: a finger that keeps moving would otherwise keep the queue from emptying.
+    if (!s_touchReplaying) touch_sample(true);
+    TouchQueue::Sample s;
+    if (!s_touchQ.next(s)) s = s_touchQ.delivered();   // nothing new: same state as before
+    data->point.x = s.x;
+    data->point.y = s.y;
+    data->state = s.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->continue_reading = !s_touchQ.empty();
+    s_touchReplaying = data->continue_reading;
 }
 
 namespace display {
@@ -681,6 +719,7 @@ bool begin() {
         s_indev_drv.type = LV_INDEV_TYPE_POINTER;
         s_indev_drv.read_cb = touch_read_cb;
         lv_indev_drv_register(&s_indev_drv);
+        s_touchOk = true;
         Serial.println("[display] touch registered (" BOARD_NAME ")");
     }
 
