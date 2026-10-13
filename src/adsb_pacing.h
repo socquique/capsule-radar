@@ -50,11 +50,20 @@ public:
         if (parked(slot, nowMs)) return true;
         // Unsigned elapsed: a signed compare read an attempt older than 2^31 ms as
         // "just happened" after rollover and cooled the provider forever.
-        uint32_t silence = _silenceMs[slot];
-        if (silence > ADSB_SILENCE_OUTAGE_MAX_MS && everyoneSilent(nowMs)) silence = ADSB_SILENCE_OUTAGE_MAX_MS;
-        const uint32_t gap = _spacingMs[slot] > silence ? _spacingMs[slot] : silence;
+        const uint32_t gap = gapMs(slot, nowMs);
         if (gap && nowMs - _lastAttemptMs[slot] < gap) return true;
         return false;
+    }
+
+    // The gap cooling() enforces between two requests to this provider right now: the
+    // larger of the 429 spacing and the silence gap, with the silence gap capped while every
+    // provider is silent. Parks are separate (parked()). The caller logs this rather than
+    // the stored silence gap, which is kept uncapped and read "60 s" during an outage
+    // whose requests were really going out every 10 s (seen by @h0verin on #34).
+    uint32_t gapMs(int slot, uint32_t nowMs) const {
+        uint32_t silence = _silenceMs[slot];
+        if (silence > ADSB_SILENCE_OUTAGE_MAX_MS && everyoneSilent(nowMs)) silence = ADSB_SILENCE_OUTAGE_MAX_MS;
+        return _spacingMs[slot] > silence ? _spacingMs[slot] : silence;
     }
 
     void onAttempt(int slot, uint32_t nowMs) {

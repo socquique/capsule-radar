@@ -3,11 +3,17 @@ name: Release firmware
 # Push a tag like v1.0.0 to build the merged firmware and attach it to a GitHub
 # Release (a single .bin makers can flash with esptool or the web flasher):
 #   git tag v1.0.0 && git push origin v1.0.0
+# Or run it by hand (Actions -> Release firmware -> Run workflow) on main with the `tag`
+# input set: the release step then creates that tag on the commit it built.
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create, e.g. v1.4.9 (leave empty when running on an existing tag)'
+        required: false
 
 permissions:
   contents: write
@@ -59,6 +65,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           files: |
             CapsuleRadar-esp32s3.bin
             CapsuleRadar-ota.bin

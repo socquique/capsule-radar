@@ -275,7 +275,10 @@ void ui_set_range_km(float km) {
 static bool s_lpArmed = false;      // long-press timer passed, finger still down
 static bool s_lpMoved = false;      // finger travelled past the drag threshold since the press
 static lv_point_t s_lpOrigin;
-#define LP_MOVE_PX 10   // finger travel that counts as a drag (matches LVGL's scroll limit)
+// Finger travel that counts as a drag. 10 px (LVGL's scroll limit) is under 1 mm on these
+// panels, less than a still fingertip drifts: on a 1.43, 3 of 15 holds were cancelled at
+// 12-14 px (@h0verin, #36). A real swipe across tiles still cancels through PRESS_LOST.
+#define LP_MOVE_PX 25
 
 static void radar_press_cb(lv_event_t *e) {
     s_longPressed = false;

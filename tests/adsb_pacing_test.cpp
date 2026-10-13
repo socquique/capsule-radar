@@ -293,9 +293,12 @@ int main() {
         // Still in the outage the cap applies...
         assert(!p.cooling(1, (uint32_t)(last1 + ADSB_SILENCE_OUTAGE_MAX_MS)));
         assert(!p.cooling(2, (uint32_t)(last2 + ADSB_SILENCE_OUTAGE_MAX_MS)));
+        // ...and gapMs(), which the feed log prints, says so instead of the stored 60 s.
+        assert(p.gapMs(1, last1) == ADSB_SILENCE_OUTAGE_MAX_MS);
         // ...then slot 0 answers, and slots 1 and 2 wait their full gap again.
         p.onAttempt(0, (uint32_t)(4 * 60000 + 1000));
         p.onOk(0);
+        assert(p.gapMs(1, last1) == ADSB_SPACING_MAX_MS);
         assert(p.cooling(1, (uint32_t)(last1 + ADSB_SPACING_MAX_MS - 1)));
         assert(!p.cooling(1, (uint32_t)(last1 + ADSB_SPACING_MAX_MS)));
         assert(p.cooling(2, (uint32_t)(last2 + ADSB_SPACING_MAX_MS - 1)));
@@ -315,7 +318,9 @@ int main() {
         // Every provider is silent now, yet slot 0 is still spaced out by its 429 gap.
         assert(p.cooling(0, 2000 + ADSB_SPACING_MAX_MS - 1));
         assert(!p.cooling(0, 2000 + ADSB_SPACING_MAX_MS));
+        assert(p.gapMs(0, 2000) == ADSB_SPACING_MAX_MS);
         // The others wait only the (capped) silence gap, which is 4 s after two failures.
+        assert(p.gapMs(1, 2000) == ADSB_SPACING_STEP_MS);
         assert(p.cooling(1, 2000 + ADSB_SPACING_STEP_MS - 1));
         assert(!p.cooling(1, 2000 + ADSB_SPACING_STEP_MS));
     }
