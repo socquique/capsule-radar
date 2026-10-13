@@ -1,5 +1,5 @@
 // QMI8658 accelerometer over I2C (Arduino). Shares the bus with the touch (SDA/SCL
-// in config.h). We only need gravity on the Z axis to detect a face-down board.
+// in config.h). We only need gravity on the Z axis; facedown_sleep.h decides "face-down".
 #include "imu_qmi8658.h"
 #include "config.h"
 #include <Arduino.h>
@@ -11,13 +11,9 @@
 #define QMI_CTRL7   0x08   // sensor enable
 #define QMI_AZ_L    0x39   // accel Z low byte (high byte at 0x3A)
 
-// ±2g full scale -> 16384 LSB/g.
-#define FACEDOWN_THRESHOLD (9000)   // ~0.55 g past zero on the side opposite the resting one
 
 static uint8_t s_addr    = 0x6B;
 static bool    s_ok      = false;
-static int32_t s_ref     = 0;      // slow baseline of the resting az (see imu_facedown)
-static bool    s_haveRef = false;
 
 static bool wr(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(s_addr);
@@ -55,23 +51,10 @@ bool imu_begin() {
     return false;
 }
 
-// 1 = face-down, 0 = not, -1 = couldn't read (shared I2C bus is noisy — a failed read
-// must NOT be treated as "not face-down", or it keeps resetting the debounce counter and
-// the screen never sleeps).
-int imu_facedown() {
-    if (!s_ok) return -1;
+bool imu_read_az(int16_t *az) {
+    if (!s_ok) return false;
     uint8_t b[2];
-    if (!rd(QMI_AZ_L, b, 2)) return -1;
-    const int16_t az = (int16_t)((b[1] << 8) | b[0]);
-
-    // Orientation-agnostic: we don't assume which Z sign is "up" (it depends on how the
-    // board sits in the case, and it isn't the same on every unit). Track a slow baseline
-    // of the *resting* az and call it face-down when gravity swings to the far OPPOSITE
-    // side — i.e. the device was flipped over. Works whatever the sensor's sign.
-    if (!s_haveRef) { s_ref = az; s_haveRef = true; }
-    const bool down = (s_ref < 0) ? (az > FACEDOWN_THRESHOLD) : (az < -FACEDOWN_THRESHOLD);
-    if (!down) s_ref += (az - s_ref) >> 4;   // EMA toward the current (not-face-down) orientation
-    return down ? 1 : 0;
+    if (!rd(QMI_AZ_L, b, 2)) return false;
+    *az = (int16_t)((b[1] << 8) | b[0]);
+    return true;
 }
-
-void imu_rebaseline() { s_haveRef = false; }
