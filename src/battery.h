@@ -8,3 +8,4 @@ int  battery_percent();    // 0..100, or -1 if unknown
 bool battery_charging();   // currently charging
 bool battery_vbus_in();    // USB/DC input present (true even with a full battery)
 void battery_enable_codec_rail();  // enable ALDO1 3.3V (ES8311 analog AVDD) for audio
+void battery_power_off();          // AXP2101 soft power-off (the PWR button or a USB plug-in should turn it back on)
