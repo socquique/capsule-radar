@@ -45,22 +45,21 @@ The board's wiki ships these examples — clone them and lift the exact init cod
 Wiki: https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75
 
 ## Data source (full detail in docs/DATA_SOURCE.md)
-**airplanes.live** free REST API. Query by position + radius:
-`GET https://api.airplanes.live/v2/point/{lat}/{lon}/{radius_nm}`
-Returns JSON with an aircraft array (key `ac`, readsb format). Fields we use: `hex`, `flight`, `lat`, `lon`, `alt_baro`, `track`/`true_heading`, `gs`, `baro_rate`, `squawk`, `seen_pos`.
+Three readsb-compatible REST providers, tried in order and each paced independently (`src/config.h`):
+`api.airplanes.live` → `opendata.adsb.fi` → `api.adsb.lol`. Query by position + radius; the URL templates are in `src/adsb_client.cpp` (adsb.fi's path differs from the other two).
 - **Educational / non-commercial use only** — that's exactly this project. Be polite: ~1 request / 1–2 s, set a descriptive User-Agent.
-- Fallback: **adsb.lol** (`https://api.adsb.lol/v2/point/...`, same format).
-- Avoid OpenSky for now (OAuth2 + tighter limits, awkward on-device).
+- airplanes.live is contributor-only (IP-granted) since Sept 2026; a 403 parks it with an escalating backoff and the firmware runs on the other two.
+- Avoid OpenSky (OAuth2 + tighter limits, awkward on-device).
 
 ## Architecture (full detail in docs/ARCHITECTURE.md)
 - **Core 0 task** (`adsb_task`): WiFi keepalive, fetch + parse the feed every `POLL_INTERVAL_MS`, write into a shared `std::vector<Aircraft>` guarded by a FreeRTOS mutex.
 - **Core 1 / Arduino loop**: LVGL tick + render. Reads the aircraft list under the mutex, projects lat/lon → screen (see `geo.*`), draws the scope, sweep, trails, glyphs, labels and the active detail card.
 - 8 MB PSRAM easily holds a full RGB565 framebuffer (466×466×2 ≈ 434 KB) and double-buffer; allocate LVGL draw buffers in PSRAM.
-- Settings (WiFi creds, home lat/lon, range, units, theme) in NVS (`Preferences`). First-boot **captive portal** (WiFiManager) to enter them. **OTA** via ArduinoOTA.
+- Settings (WiFi creds, home lat/lon, range, units, theme) in NVS (`Preferences`). First boot opens a **captive portal** (WiFiManager) for the WiFi credentials only; the rest is configured on the device's web page. **OTA** via ArduinoOTA.
 
 ## Repo layout
 ```
-plane-radar-2.0/
+capsule-radar/
 ├─ CLAUDE.md              ← you are here
 ├─ README.md
 ├─ platformio.ini
@@ -69,17 +68,19 @@ plane-radar-2.0/
 │  ├─ boards/            ← one header per board (pin map, panel gaps, what's fitted)
 │  ├─ geo.h              ← haversine / bearing / project-to-screen (complete)
 │  ├─ aircraft.h         ← Aircraft data model
-│  ├─ adsb_client.h/.cpp ← fetch + parse airplanes.live (working draft, untested on HW)
-│  ├─ radar_view.h       ← scope rendering API (to implement)
-│  └─ main.cpp           ← task setup + glue (skeleton with TODOs)
+│  ├─ adsb_client.h/.cpp ← fetch + parse the three ADS-B providers; per-provider pacing in adsb_pacing.h
+│  ├─ radar_view.h/.cpp  ← scope rendering (rings, sweep trail, glyphs, themes)
+│  ├─ display.cpp        ← panel bring-up + the per-pixel sweep compositor
+│  ├─ ui.cpp             ← LVGL views (radar/list/stats), detail card, HUD, zoom button
+│  └─ main.cpp           ← tasks, WiFi/portal, web config server, settings, watchdog
 ├─ docs/
-│  ├─ HARDWARE.md
-│  ├─ DATA_SOURCE.md
-│  ├─ FEATURES.md
-│  ├─ ARCHITECTURE.md
-│  └─ SETUP.md
 └─ assets/
    └─ plane_radar_2.0_mockup.html   ← visual target
+
+Other `src/` modules follow the same shape: one client + renderer per optional feature
+(`weather*`, `wx_radar*`, `cloud_image*`, `route*`, `photo*`), plus drivers for touch
+(`touch_cst9217`/`touch_ft3168`), IMU, RTC, battery/PMIC, audio, GPS, airports and
+coastline data, and `sim_main.cpp` (the desktop SDL simulator).
 ```
 
 ## Build / flash
@@ -92,12 +93,12 @@ pio device monitor -b 115200                # serial
 Always pass `-e`; there is one env per board. The boot log names the board an image was
 built for — check it first when a screen stays black.
 
-## Roadmap (suggested milestones)
-- **M0 — Bring-up**: get the official HelloWorld/LVGL widgets demo running; copy verified databus + I2C pins into `config.h`. Backlight + touch + a "hello" screen.
-- **M1 — Static scope**: draw rings, crosshair, N/E/S/W, center dot, animated sweep. Match the mockup palette on true-black AMOLED.
-- **M2 — Live data**: WiFi + captive portal; `adsb_client` fetch/parse; project aircraft to screen; glyphs rotated by `track`; altitude color map; fading trails.
-- **M3 — Touch & detail**: hit-test nearest glyph on tap → detail card (callsign, type, alt, gs, vs, dist, bearing, squawk). Swipeable views: radar / list / stats.
-- **M4 — Polish**: range zoom; north-up vs track-up; emergency/military/type alerts + speaker ping; idle auto-dim; IMU face-down sleep / shake-to-refresh; OTA; persist settings.
+## Status
+The firmware is feature-complete for its current scope (see README for the feature
+list): live feed with failover, four themes, detail card with route + photo lookups,
+weather modes (forecast / precipitation radar / satellite clouds), web configuration,
+OTA, battery/GPS variants and the desktop simulator. Ideas still on the shelf are marked
+"not built yet" in `docs/FEATURES.md`.
 
 ## Conventions & guardrails
 - C++17. Keep the render path non-blocking — no network or `delay()` in the LVGL loop; all I/O lives in `adsb_task`.
