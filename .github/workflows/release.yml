@@ -5,6 +5,11 @@ name: Release firmware
 #   git tag v1.0.0 && git push origin v1.0.0
 # Or run it by hand (Actions -> Release firmware -> Run workflow) on main with the `tag`
 # input set: the release step then creates that tag on the commit it built.
+#
+# Builds ALL supported boards:
+#   esp32-s3-amoled-175 -> CapsuleRadar-*             (ESP32-S3-Touch-AMOLED-1.75, CO5300)
+#   esp32-s3-amoled-143 -> CapsuleRadar-*-amoled143   (ESP32-S3-Touch-AMOLED-1.43, CO5300)
+#   esp32-s3-lcd-21     -> CapsuleRadar-*-lcd21       (ESP32-S3-Touch-LCD-2.1, ST7701 480x480)
 
 on:
   push:
@@ -40,10 +45,6 @@ jobs:
           build() {   # build <pio-env> <filename-suffix>
             local env="$1" sfx="$2" b=".pio/build/$1"
             pio run -e "$env"
-            # Look for boot_app0.bin AFTER the build, not before: on a clean runner
-            # ~/.platformio/packages does not exist until the first `pio run` installs the
-            # toolchain, so hoisting this above the builds silently yields an empty path and
-            # esptool then fails with "No such file or directory: ''".
             local boot_app0
             boot_app0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' 2>/dev/null | head -1)"
             if [ -z "$boot_app0" ]; then
@@ -51,9 +52,19 @@ jobs:
               find "$HOME/.platformio/packages" -name '*.bin' 2>/dev/null | head -20
               return 1
             fi
+            # IDF component mode puts bootloader under a subdirectory
+            local bootloader="$b/bootloader.bin"
+            if [ ! -f "$bootloader" ]; then
+              bootloader="$(find "$b" -name bootloader.bin 2>/dev/null | head -1)"
+            fi
+            if [ -z "$bootloader" ] || [ ! -f "$bootloader" ]; then
+              echo "::error::bootloader.bin not found for $env"
+              find "$b" -name '*.bin' 2>/dev/null | head -20
+              return 1
+            fi
             python -m esptool --chip esp32s3 merge_bin -o "CapsuleRadar-esp32s3$sfx.bin" \
               --flash_mode dio --flash_freq 80m --flash_size 16MB \
-              0x0     "$b/bootloader.bin" \
+              0x0     "$bootloader" \
               0x8000  "$b/partitions.bin" \
               0xe000  "$boot_app0" \
               0x10000 "$b/firmware.bin"
@@ -61,6 +72,14 @@ jobs:
           }
           build esp32-s3-amoled-175 ""
           build esp32-s3-amoled-143 "-amoled143"
+          build esp32-s3-lcd-21 "-lcd21"
+
+      - name: Verify sdkconfig IRAM flags (LCD-2.1)
+        run: |
+          SDK=.pio/build/esp32-s3-lcd-21/config/sdkconfig.h
+          for flag in LCD_RGB_ISR_IRAM_SAFE GDMA_ISR_IRAM_SAFE GDMA_CTRL_FUNC_IN_IRAM; do
+            grep -qx "#define CONFIG_${flag} 1" "$SDK"
+          done
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -72,18 +91,23 @@ jobs:
             CapsuleRadar-ota.bin
             CapsuleRadar-esp32s3-amoled143.bin
             CapsuleRadar-ota-amoled143.bin
+            CapsuleRadar-esp32s3-lcd21.bin
+            CapsuleRadar-ota-lcd21.bin
           generate_release_notes: true
           body: |
-            **First flash (USB):** `CapsuleRadar-esp32s3.bin` — the full merged image (offset `0x0`).
-            - Browser, no toolchain: https://socquique.github.io/capsule-radar/
-            - Or: `esptool.py --chip esp32s3 write_flash 0x0 CapsuleRadar-esp32s3.bin`
+            Three boards are supported. Match the file suffix to your hardware:
 
-            **Update over WiFi (no cable):** `CapsuleRadar-ota.bin` — the app-only image.
-            Open `http://capsuleradar.local/update` on the device and upload this file.
-            (Do **not** upload the merged image there.)
+            **First flash (USB):** `*-esp32s3*.bin` — the full merged image (offset `0x0`).
+            - Browser, no toolchain: https://socquique.github.io/capsule-radar/
+            - Or: `esptool.py --chip esp32s3 write_flash 0x0 <file>`
+
+            **Update over WiFi (no cable):** `CapsuleRadar-ota*.bin` — the app-only image.
+            Open `http://capsuleradar.local/update` on the device and upload the file
+            matching your board. (Do **not** upload the merged image there.)
 
             **Which file?** Unsuffixed files are for the reference **ESP32-S3-Touch-AMOLED-1.75**.
             Files with `amoled143` in the name are for the **ESP32-S3-Touch-AMOLED-1.43**.
-            The two boards have completely different pin maps — the wrong image gives a
+            Files with `lcd21` in the name are for the **ESP32-S3-Touch-LCD-2.1**.
+            The boards have completely different pin maps — the wrong image gives a
             black screen, so check your board before flashing. (The browser flasher
-            currently installs the 1.75 build only.)
+            currently supports the AMOLED boards.)

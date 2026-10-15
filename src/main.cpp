@@ -1114,7 +1114,7 @@ void setup() {
     wx_radar_begin();
     cloud_image_begin();
     g_ac_mutex = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(adsb_task, "adsb", 16384, nullptr, 1, nullptr, 0);  // TLS needs a big stack
+    xTaskCreatePinnedToCore(adsb_task, "adsb", ADSB_TASK_STACK_BYTES, nullptr, 1, nullptr, 0);  // TLS needs a big stack
 
     // configuration web page (http://capsuleradar.local/)
     g_web.on("/", handleRoot);

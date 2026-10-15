@@ -28,12 +28,14 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define WX_RADAR_REFRESH_MS 300000UL       // RainViewer frames update about every 5 minutes
 #define CLOUD_IMAGE_REFRESH_MS 600000UL    // EUMETSAT MTG cloud imagery; cache for 10 minutes
 
-// ---------- Screen (CO5300 AMOLED, 466x466 on every supported board) ----------
+// ---------- Screen geometry (AMOLED defaults; LCD 2.1 overrides below) ----------
+#if !defined(BOARD_LCD21)
 #define SCREEN_W            466
 #define SCREEN_H            466
 #define SCREEN_CX           233
 #define SCREEN_CY           233
 #define RADAR_R_OUTER_PX    218            // outer ring radius in pixels
+#endif
 // radar sweep (radar_view.cpp draws it in LVGL; display.cpp's compositor draws it per pixel)
 #define SWEEP_PERIOD_MS     8000           // one revolution (LVGL sweep)
 #define SWEEP_COMP_PERIOD_MS 40000         // one revolution when the compositor draws it (a slower sweep hides the
@@ -122,11 +124,14 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 // The pin map, panel gaps, touch driver and which peripherals exist all live in a
 // per-board header. Select one with a build flag in platformio.ini; the 1.75 is the
 // default so an unflagged build behaves exactly as before.
+//   -DBOARD_LCD21       -> Waveshare ESP32-S3-Touch-LCD-2.1
 //   -DBOARD_AMOLED_143  -> Waveshare ESP32-S3-Touch-AMOLED-1.43
 //   (none)              -> Waveshare ESP32-S3-Touch-AMOLED-1.75  (reference board)
 // Never guess pins for a new board: take them from the vendor demo or the Arduino
 // core board variant, then confirm them on hardware before committing.
-#if defined(BOARD_AMOLED_143)
+#if defined(BOARD_LCD21)
+#  include "boards/board_lcd_21.h"
+#elif defined(BOARD_AMOLED_143)
 #  include "boards/board_amoled_143.h"
 #else
 #  include "boards/board_amoled_175.h"
@@ -135,4 +140,8 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 // Safety net: catches a board header that still has placeholder pins in it.
 #if (PIN_LCD_SCLK < 0) || (PIN_I2C_SDA < 0)
 #  error "board header: QSPI/I2C pins are placeholders (-1). Fill in the real values."
+#endif
+
+#ifndef ADSB_TASK_STACK_BYTES
+#define ADSB_TASK_STACK_BYTES 16384
 #endif

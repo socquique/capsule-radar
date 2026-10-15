@@ -62,6 +62,23 @@ The Waveshare **ESP32-S3-Touch-AMOLED-1.43** is also supported in-tree. Same SoC
 
 Pin maps live in [`src/boards/`](src/boards/), one header per board, selected by a `-DBOARD_*` build flag. They are taken from the vendor board definition and then **confirmed on hardware** — never guessed. Shared tunables stay in [`src/config.h`](src/config.h).
 
+### Waveshare ESP32-S3-Touch-LCD-2.1
+
+The 2.1-inch board uses a 480×480 ST7701 RGB IPS panel, CST820 touch, and a
+TCA9554 GPIO expander. Its pin map and timings live in `src/boards/board_lcd_21.h`.
+It has no PMIC or audio codec; battery reporting and alert sounds are disabled.
+
+Build with `pio run -e esp32-s3-lcd-21`; upload over USB with `-t upload`, or use
+`pio run -e esp32-s3-lcd-21-ota -t upload` once connected to WiFi.
+Release assets include `CapsuleRadar-esp32s3-lcd21.bin` (merged USB image at 0x0)
+and `CapsuleRadar-ota-lcd21.bin` (app-only image for the device's web update page).
+The browser flasher currently supports the AMOLED boards.
+
+The LCD environment rebuilds ESP-IDF with IRAM-safe LCD/GDMA interrupts and octal
+PSRAM enabled for RGB refresh during WiFi flash operations. Its initial build takes
+longer than the AMOLED environments. The QSPI sweep compositor remains enabled on
+AMOLED; the RGB panel uses the shared LVGL sweep renderer.
+
 ### Where to buy the board
 
 The 1.75″ board is in a **global stock squeeze** right now (even Waveshare lists it on backorder), so availability moves week to week. The official store is the reference; the Amazon links are what is actually in stock as of this writing.
