@@ -42,6 +42,11 @@ public:
     int read() override {
         const int value = _source.read();
         if (value >= 0) ++_bytesRead;
+        // timedRead() calls this in a loop with no yield until a byte arrives. If the server
+        // pauses mid-body for more than 5 s, that busy loop starves IDLE0 and the task
+        // watchdog restarts the radar. A 1 ms wait lets the idle task run; the stream
+        // timeout still ends a stalled read.
+        else delay(1);
         return value;
     }
     int peek() override { return _source.peek(); }
