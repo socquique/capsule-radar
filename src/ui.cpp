@@ -887,20 +887,77 @@ static lv_obj_t *make_tile_title(lv_obj_t *tile, const char *txt) {
     return l;
 }
 
-// A full-screen round panel that clips its content to the circle (for list/stats views).
-static lv_obj_t *make_round_panel(lv_obj_t *parent) {
+// A full-screen round panel (list, stats, weather): a 0x05100A disc with a 2 px UI_GREEN ring at
+// half opacity and black outside (a weather panel's own background colour replaces the disc).
+// Drawn row by row in round_panel_cb. As a style, the radius and border ran every pixel of the
+// 462 px square through two circle masks: ~20 ms per full repaint on the device, on every frame
+// of a page swipe. Only the ring's edges need a per-pixel distance here. The list keeps the
+// radius and clip_corner, so its rows stay inside the circle.
+static void round_panel_cb(lv_event_t *e) {
+    lv_obj_t *obj = lv_event_get_target(e);
+    const lv_area_t &a = obj->coords;
+    if (lv_event_get_code(e) == LV_EVENT_COVER_CHECK) {          // every pixel of the box is drawn
+        lv_cover_check_info_t *info = (lv_cover_check_info_t *)lv_event_get_param(e);
+        if (info->res != LV_COVER_RES_MASKED)
+            info->res = _lv_area_is_in(info->area, &a, 0) ? LV_COVER_RES_COVER : LV_COVER_RES_NOT_COVER;
+        return;
+    }
+    lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
+    lv_area_t clip;
+    if (!_lv_area_intersect(&clip, &a, d->clip_area)) return;
+    lv_style_value_t local;
+    const lv_color_t black = lv_color_black(), panel = lv_color_hex(0x05100A);
+    const lv_color_t disc = lv_obj_get_local_style_prop(obj, LV_STYLE_BG_COLOR, &local, 0) == LV_RES_OK
+                            ? local.color : panel;
+    const lv_color_t ring = lv_color_mix(UI_GREEN, disc, 50);     // the border: UI_GREEN at opacity 50
+    const float cx = (a.x1 + a.x2) * 0.5f, cy = (a.y1 + a.y2) * 0.5f;
+    const float ro = lv_area_get_width(&a) * 0.5f, ri = ro - 2.0f;   // 2 px ring between ri and ro
+    const float out2 = (ro + 0.5f) * (ro + 0.5f), in2 = (ri - 0.5f) * (ri - 0.5f);
+    const lv_coord_t bw = lv_area_get_width(d->buf_area);
+    for (lv_coord_t y = clip.y1; y <= clip.y2; ++y) {
+        lv_color_t *row = (lv_color_t *)d->buf + (size_t)(y - d->buf_area->y1) * bw;
+        const float dy = (float)y - cy, dy2 = dy * dy;
+        // columns: black | edge (per pixel) | disc | edge | black
+        const float xo = dy2 < out2 ? sqrtf(out2 - dy2) : -1.0f;
+        const float xi = dy2 < in2 ? sqrtf(in2 - dy2) : -1.0f;
+        const int aL = xo < 0 ? clip.x2 + 1 : (int)ceilf(cx - xo), aR = xo < 0 ? clip.x2 : (int)floorf(cx + xo);
+        const int pL = xi < 0 ? aR + 1 : (int)ceilf(cx - xi), pR = xi < 0 ? aR : (int)floorf(cx + xi);
+        for (int x = clip.x1; x <= clip.x2;) {
+            lv_color_t *px = row + (x - d->buf_area->x1);
+            if (x < aL || x > aR) {                                // outside the circle
+                const int e = x < aL ? LV_MIN(aL - 1, clip.x2) : clip.x2;
+                lv_color_fill(px, black, (uint32_t)(e - x + 1));
+                x = e + 1;
+            } else if (x >= pL && x <= pR) {                       // inside the ring's inner edge
+                const int e = LV_MIN(pR, clip.x2);
+                lv_color_fill(px, disc, (uint32_t)(e - x + 1));
+                x = e + 1;
+            } else {                                               // on the ring's edges
+                const float dx = (float)x - cx, dist = sqrtf(dx * dx + dy2);
+                const float edge = LV_CLAMP(0.0f, ro + 0.5f - dist, 1.0f);       // outer edge
+                const float inner = LV_CLAMP(0.0f, dist - (ri - 0.5f), 1.0f);    // inner edge
+                const lv_color_t c = lv_color_mix(ring, disc, (lv_opa_t)(inner * 255.0f + 0.5f));
+                *px = lv_color_mix(c, black, (lv_opa_t)(edge * 255.0f + 0.5f));
+                ++x;
+            }
+        }
+    }
+}
+
+static lv_obj_t *make_round_panel(lv_obj_t *parent, bool clipRows) {
     lv_obj_t *p = lv_obj_create(parent);
     lv_obj_remove_style_all(p);
     lv_obj_set_size(p, 462, 462);
     lv_obj_center(p);
-    lv_obj_set_style_radius(p, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(p, lv_color_hex(0x05100A), 0);
-    lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(p, UI_GREEN, 0);
-    lv_obj_set_style_border_opa(p, 50, 0);
-    lv_obj_set_style_border_width(p, 2, 0);
-    lv_obj_set_style_clip_corner(p, true, 0);
+    lv_obj_set_style_border_width(p, 2, 0);       // the ring is drawn by round_panel_cb; this keeps the
+    lv_obj_set_style_border_opa(p, LV_OPA_TRANSP, 0);   // children's layout (LVGL aligns inside the border)
+    if (clipRows) {                                    // children (list rows, weather canvas) stay inside the circle
+        lv_obj_set_style_radius(p, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_clip_corner(p, true, 0);
+    }
     lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(p, round_panel_cb, LV_EVENT_DRAW_MAIN, nullptr);
+    lv_obj_add_event_cb(p, round_panel_cb, LV_EVENT_COVER_CHECK, nullptr);
     return p;
 }
 
@@ -1199,7 +1256,7 @@ void ui_create(void) {
     radar::setClockStageCb(clock_stage_cb);
 
     // --- list tile (circular panel, clipped to the round screen) ---
-    lv_obj_t *lp = make_round_panel(s_tileList);
+    lv_obj_t *lp = make_round_panel(s_tileList, true);
     make_tile_title(lp, "AIRCRAFT");
     s_list = lv_list_create(lp);
     lv_obj_set_size(s_list, s_bigText ? 340 : 300, 372);   // wider rows so big-font distances don't clip
@@ -1214,7 +1271,7 @@ void ui_create(void) {
     lv_obj_add_event_cb(s_list, list_tap_cb, LV_EVENT_CLICKED, NULL);   // rows aren't clickable
 
     // --- stats tile (circular panel) ---
-    lv_obj_t *sp = make_round_panel(s_tileStats);
+    lv_obj_t *sp = make_round_panel(s_tileStats, false);
     make_tile_title(sp, "STATS");
     s_statsLbl = lv_label_create(sp);
     lv_obj_set_style_text_font(s_statsLbl, F16(), 0);
@@ -1281,7 +1338,7 @@ void ui_create(void) {
     lv_obj_align(ver, LV_ALIGN_CENTER, 0, 170);
 
     // --- weather tile (current conditions + next three days) ---
-    lv_obj_t *wp = make_round_panel(s_tileWeather);
+    lv_obj_t *wp = make_round_panel(s_tileWeather, true);   // clip: the 360 px radar canvas's corners reach past the ring
     // The entire view cycles the weather mode: there is nothing else to touch here, and a
     // 34px pill 18px from the bottom of a ROUND panel is a genuinely hard target -- measured
     // presses aimed at it landed a few px low, outside it, and read as the button ignoring
