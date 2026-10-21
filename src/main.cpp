@@ -68,6 +68,7 @@ static int                   g_alertMode = 2;                        // 0=off 1=
 static float                 g_proximityKm = 0.0f;                   // proximity alert radius, km (0=off) (web/NVS)
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
 static bool                  g_fdSleep = true;                       // face-down sleep (screen off) on/off (web/NVS)
+static bool                  g_clockOn = true;                       // idle clock instead of the idle dim (web/NVS)
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
@@ -313,6 +314,7 @@ static void loadSettings() {
     g_maxAc            = p.getInt("maxac", 20);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_fdSleep          = p.getBool("fdsleep", true);
+    g_clockOn          = p.getBool("clock", true);
     g_units            = p.getInt("units", 0);
     g_tz               = p.getString("tz", TZ_STR);
     g_bigText          = p.getBool("bigtext", false);
@@ -409,14 +411,27 @@ static void rtc_seed_clock() {
     Serial.println("[rtc] system clock seeded from RTC");
 }
 
-// Brightness combines idle auto-dim and face-down sleep (sleep wins -> screen off).
-static bool g_asleep = false;   // face-down
-static bool g_idle   = false;   // no touch for a while
+// Brightness: face-down sleep wins (screen off), then the idle clock, then the idle dim.
+// The clock ramps the panel from the day brightness to clockB along with its animation,
+// so the loop calls this on every pass; the panel is written only when the value changes.
+static bool g_asleep    = false;   // face-down
+static bool g_idle      = false;   // no touch for a while
+static bool g_clockHold = false;   // idle with the clock on, but an emergency in range keeps the radar up
 static void applyBrightness() {
-    int b = g_brightnessDay;
-    if (g_idle  && BRIGHTNESS_IDLE  < b) b = BRIGHTNESS_IDLE;   // idle only dims down
+    const int day = g_brightnessDay;
+    int b = day;
+    // p is 0 on the pass that starts the clock (and a full LVGL repaint follows it), so test
+    // clockRequested() too: falling through to the idle dim there would blink the panel.
+    const float p = radar::clockProgress();
+    if (radar::clockRequested() || p > 0) {
+        const int clockB = max(day * CLOCK_BRIGHTNESS_PCT / 100, min(day, BRIGHTNESS_IDLE));
+        b = day + (int)lroundf((float)(clockB - day) * p);
+    } else if (g_idle && !g_clockHold) {
+        b = min(day, BRIGHTNESS_IDLE);                           // idle only dims down
+    }
     if (g_asleep) b = 0;                                         // face-down -> screen off
-    display::setBrightness(b);
+    static int shown = -1;
+    if (b != shown) { shown = b; display::setBrightness((uint8_t)b); }
 }
 
 // ----------------------------- configuration web --------------------------------
@@ -648,7 +663,8 @@ static void handleRoot() {
         "<div class=card><div class=t>Display</div>"
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
-        "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
+        "<label>Clock or dim after</label><select onchange='d(this.value)'>%s</select>"
+        "<label><input type=checkbox class=ck %s onchange='cl(this.checked)'>Show a clock instead of dimming</label>"
         "<label><input type=checkbox class=ck %s onchange='fd(this.checked)'>Screen off when placed face-down</label>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
@@ -702,6 +718,7 @@ static void handleRoot() {
         "function al(v){G('/alerts?mode='+v+'&save=1')}"
         "function px(v){G('/alerts?prox='+v+'&save=1')}"
         "function gp(c){G('/gps?v='+(c?1:0)+'&save=1')}"
+        "function cl(c){G('/clock?v='+(c?1:0)+'&save=1')}"
         // auto-pick the visitor's time zone from their browser clock (only if they haven't set one)
         "var TZSET=%d;(function(){if(TZSET)return;"
         "var d=new Date(),j=new Date(d.getFullYear(),0,1).getTimezoneOffset(),"
@@ -712,7 +729,7 @@ static void handleRoot() {
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
-        g_brightnessDay, iopts.c_str(), g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
+        g_brightnessDay, iopts.c_str(), g_clockOn ? "checked" : "", g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
         tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
@@ -882,6 +899,20 @@ static void handleSweep() {   // show/hide the rotating sweep line (live)
             Preferences p;
             p.begin("capsuleradar", false);
             p.putBool("sweep", g_showSweep);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleClock() {   // idle clock on/off (live; off = the plain idle dim)
+    if (refuseUnlessPageFetch()) return;
+    if (g_web.hasArg("v")) {
+        g_clockOn = g_web.arg("v").toInt() != 0;      // loop() starts or ends it on its next pass
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("clock", g_clockOn);
             p.end();
         }
     }
@@ -1129,7 +1160,7 @@ void setup() {
     if (!display::begin()) {
         Serial.println("[!] display::begin() failed — check QSPI pins / power.");
     } else if (display::sweepAvailable()) {
-        radar::setSweepCompositor(display::sweepConfig, display::sweepTick);   // per-pixel sweep (display.cpp)
+        radar::setSweepCompositor(display::sweepConfig, display::sweepTick, display::sweepAngleDeg);   // per-pixel sweep (display.cpp)
     }
 
     // restore the saved theme, then persist any future change
@@ -1256,6 +1287,7 @@ void setup() {
     g_web.on("/vol", handleVol);
     g_web.on("/alerts", handleAlerts);
     g_web.on("/idle", handleIdle);
+    g_web.on("/clock", handleClock);
     g_web.on("/fdsleep", handleFdSleep);
     g_web.on("/sweep", handleSweep);
     g_web.on("/airports", handleAirports);
@@ -1467,14 +1499,19 @@ void loop() {
         int16_t az = 0;
         const bool haveAz = imu_read_az(&az);
         faceDown.update(haveAz, az, touched, g_fdSleep);   // g_fdSleep: web toggle
-        const bool sleep = faceDown.asleep();
-        const bool idle  = g_idleDimMs > 0 && display::inactiveMs() > g_idleDimMs;
-        if (sleep != g_asleep || idle != g_idle) {
-            g_asleep = sleep;
-            g_idle = idle;
-            applyBrightness();   // dark (0) also makes a touch only wake it (display.h)
-        }
+        g_asleep = faceDown.asleep();   // applyBrightness() below: dark (0) also makes a touch only wake it
     }
+
+    // Idle: the clock, or the plain dim. Checked on every pass, so the touch that wakes the
+    // radar sends the clock away at once. The clock needs the radar view on screen and a
+    // known time (radar::setClock refuses without one, and is asked again next pass).
+    g_idle = g_idleDimMs > 0 && display::inactiveMs() > g_idleDimMs;
+    const bool wantClock = g_clockOn && g_idle && ui_sweep_visible();
+    g_clockHold = wantClock && radar::emergencyInRange();      // an emergency nearby: radar stays up
+    const bool showClock = wantClock && !g_clockHold;
+    if (showClock != radar::clockRequested() && radar::setClock(showClock))
+        Serial.println(showClock ? "[clock] idle: radar -> clock" : "[clock] radar is back");
+    applyBrightness();
 
     delay(5);
 }

@@ -1,13 +1,17 @@
-// Radar scope (M1) + aircraft (M2) + selection (M3) + selectable themes (M4).
+// Radar scope (M1) + aircraft (M2) + selection (M3) + selectable themes (M4) + idle clock.
 // Pure LVGL, portable. Visual reference: assets/plane_radar_2.0_mockup.html
 //   THEME_PHOSPHOR : green-on-black radar scope (rings, sweep, altitude glyphs)
 //   THEME_ORB   : Orb scope: green gradient, square grid, the 7 nearest
 //                    aircraft as yellow balls (emitting waves) + off-range arrows.
+// Idle clock (clock_face.h has the animation): this file dims the scene in a few steps and
+// draws the dial; the compositor (display.cpp) draws the moving hands on the device, and
+// this file draws them itself when there is no compositor (the SDL simulator).
 #include "radar_view.h"
 #include "config.h"
 #include "geo.h"
 #include "coastline.h"
 #include "airports.h"
+#include "clock_face.h"
 #include <lvgl.h>
 #include <math.h>
 #include <stdio.h>
@@ -19,6 +23,8 @@
 #include <deque>
 #include <algorithm>
 #include <stdlib.h>
+#include <sys/time.h>
+#include <time.h>
 #if defined(ESP_PLATFORM)
 #include <esp_heap_caps.h>
 #endif
@@ -103,6 +109,41 @@ static int         s_frameCtr     = 0;
 static lv_coord_t  s_cx = SCREEN_CX, s_cy = SCREEN_CY;
 static std::string s_selHex;
 
+// ---- idle clock ----
+static ClockFace   s_clock;
+static int         s_clockStage = 0;            // scene step applied (ClockFrame::stage; 0 = radar)
+static lv_obj_t   *s_clockLayer = nullptr;      // dial (+ the hands when there is no compositor)
+static ClockFrame  s_lvClock    = {};           // last frame, for the LVGL-drawn hands (simulator)
+static lv_opa_t    s_dimOpa     = LV_OPA_COVER; // scene behind the clock: planes, trails, rings, map
+static bool        s_labelsOn   = true;         // plane names and altitudes
+static lv_opa_t    s_dialOpa    = 0;            // dial, as a fraction of its own (dim) levels
+static float     (*s_compAngle)() = nullptr;    // the compositor's sweep angle (setSweepCompositor)
+static void      (*s_clockStageCb)(int) = nullptr;
+static bool        clock_time_now(ClockHands &out);
+static bool      (*s_clockTime)(ClockHands &) = clock_time_now;
+static ClockHands  s_wall = {};                 // last good wall time
+
+// Scale an opacity by the clock's scene dim (255 = radar as usual).
+static inline lv_opa_t dim(int opa) { return (lv_opa_t)((opa * s_dimOpa + 127) / 255); }
+
+// Default time source: the system clock (RTC-seeded, NTP-synced) in the configured zone.
+// Before 2023-11-14 the clock was never set: no clock face then.
+static bool clock_time_now(ClockHands &out) {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    if (tv.tv_sec <= 1700000000L) return false;
+    const time_t t = tv.tv_sec;
+    struct tm lt;
+    localtime_r(&t, &lt);
+    out = clock_hands(lt.tm_hour, lt.tm_min, lt.tm_sec, (int)(tv.tv_usec / 1000));
+    return true;
+}
+static const ClockHands &clock_wall() {
+    ClockHands h;
+    if (s_clockTime(h)) s_wall = h;
+    return s_wall;
+}
+
 struct FlowSeg { lv_point_t a, b; uint16_t gen; };   // gen = the poll it was laid down on
 static std::deque<FlowSeg> s_flow;
 static int s_flowRedrawCtr = 0;
@@ -132,6 +173,8 @@ static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb() { return s_theme == THEME_ORB; }
+// The second hand's colour. Orb has no sweep and a green lead on a green scope: orange there.
+static inline lv_color_t clock_lead_color() { return orb() ? ORB_ACCENT : s_cLead; }
 
 // The aircraft the scope draws, and so the ones a tap can hit: the nearest s_maxOnScreen,
 // then Orb's own caps (ORB_BLIPS in-range balls, ORB_ARROWS off-range arrows); phosphor
@@ -231,7 +274,7 @@ static void grid_draw_cb(lv_event_t *e) {
         lv_draw_line_dsc_init(&gl);
         gl.color = ORB_GRID;
         gl.width = 1;
-        gl.opa = 120;
+        gl.opa = dim(120);
         const int step = 38;
         for (int x = s_cx % step; x < SCREEN_W; x += step) {
             lv_point_t p1 = { (lv_coord_t)x, 0 }, p2 = { (lv_coord_t)x, SCREEN_H - 1 };
@@ -248,20 +291,20 @@ static void grid_draw_cb(lv_event_t *e) {
         lv_draw_rect_dsc_t td;
         lv_draw_rect_dsc_init(&td);
         td.bg_color = ORB_ACCENT;
-        td.bg_opa = LV_OPA_COVER;
+        td.bg_opa = dim(LV_OPA_COVER);
         td.border_color = lv_color_hex(0x8A4A00);
         td.border_width = 1;
-        td.border_opa = 160;
-        coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
+        td.border_opa = dim(160);
+        coastline_draw(d, COAST_COLOR, dim(170), 2);    // landmass outline under the triangle
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, dim(150));
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
 
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
-    coastline_draw(d, COAST_COLOR, 165, 2);
-    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
+    coastline_draw(d, COAST_COLOR, dim(165), 2);
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, dim(150));
 
     // phosphor: concentric rings + crosshair
     lv_draw_arc_dsc_t ad;
@@ -270,13 +313,13 @@ static void grid_draw_cb(lv_event_t *e) {
     ad.width = 2;
     const lv_coord_t rr[4] = { 50, 104, 160, RADAR_R_OUTER_PX };
     const lv_opa_t   ro[4] = { 66, 66, 66, 87 };
-    for (int i = 0; i < 4; ++i) { ad.opa = ro[i]; lv_draw_arc(d, &ad, &c, rr[i], 0, 360); }
+    for (int i = 0; i < 4; ++i) { ad.opa = dim(ro[i]); lv_draw_arc(d, &ad, &c, rr[i], 0, 360); }
 
     lv_draw_line_dsc_t ll;
     lv_draw_line_dsc_init(&ll);
     ll.color = s_cRing;
     ll.width = 2;
-    ll.opa = 41;
+    ll.opa = dim(41);
     lv_point_t h1 = { (lv_coord_t)(s_cx - 211), s_cy }, h2 = { (lv_coord_t)(s_cx + 211), s_cy };
     lv_point_t v1 = { s_cx, (lv_coord_t)(s_cy - 211) }, v2 = { s_cx, (lv_coord_t)(s_cy + 211) };
     lv_draw_line(d, &ll, &h1, &h2);
@@ -296,14 +339,19 @@ static void sweep_draw_cb(lv_event_t *e) {
     ld.width = 5;
     ld.round_start = 1;
     ld.round_end = 1;
+    // While the clock is up (simulator only: s_compConfig is null here) the trail dims and
+    // follows the second hand, which clock_draw_cb draws on top of the planes.
+    const bool clockUp = s_clockStage != 0;
+    const float trailMul = clockUp ? (float)s_lvClock.trailOpa / 255.0f : 1.0f;
     for (int i = SWEEP_TRAIL_STEPS; i >= 1; --i) {
         const float frac = 1.0f - (float)i / (float)SWEEP_TRAIL_STEPS;
         const float ang  = s_sweepDeg - (float)i * (SWEEP_TRAIL_DEG / (float)SWEEP_TRAIL_STEPS);
-        ld.opa = (lv_opa_t)(frac * frac * (float)SWEEP_TRAIL_OPA);
+        ld.opa = (lv_opa_t)(frac * frac * (float)SWEEP_TRAIL_OPA * trailMul);
         if (ld.opa < 2) continue;
         lv_point_t p2 = rim_point(ang, R);
         lv_draw_line(dctx, &ld, &center, &p2);
     }
+    if (clockUp) return;
     lv_draw_line_dsc_t le;
     lv_draw_line_dsc_init(&le);
     le.color = s_cLead;
@@ -367,9 +415,54 @@ static void interp_step(void) {
 #endif
 }
 
+namespace radar { static void sweep_sync(); }
+
+// One scene step of the idle clock (ClockFrame::stage): dim the scene, hide the labels, swap
+// N/E/S/W for the dial. LVGL repaints take ~150-200 ms on the device, so the scene changes in
+// a few steps, each one full repaint; what moves is drawn every frame (by the compositor, or
+// by clock_draw_cb without one). Only ever called from the LVGL timer, never mid-render.
+static void apply_clock_stage(int stage) {
+    if (stage == s_clockStage) return;
+    s_clockStage = stage;
+    s_dimOpa   = stage == 0 ? LV_OPA_COVER : (stage == 1 ? CLOCK_RADAR_OPA_STEP1 : CLOCK_RADAR_OPA);
+    s_labelsOn = stage == 0;
+    s_dialOpa  = stage >= 3 ? LV_OPA_COVER : (stage == 2 ? LV_OPA_50 : LV_OPA_TRANSP);
+    const lv_opa_t letters = stage == 0 ? LV_OPA_COVER : (stage == 1 ? LV_OPA_50 : LV_OPA_TRANSP);
+    for (lv_obj_t *r : s_rose) if (r) lv_obj_set_style_text_opa(r, letters, 0);
+    if (s_flowCanvas) lv_obj_set_style_img_opa(s_flowCanvas, s_dimOpa, 0);
+    if (s_parent && orb()) lv_obj_set_style_bg_opa(s_parent, s_dimOpa, 0);
+    show(s_rangeLbl, stage == 0 && s_rangeLblVisible && !orb());
+    show(s_clockLayer, stage != 0);
+    radar::sweep_sync();                       // the centre ripple pauses while the clock is up
+    if (s_parent) lv_obj_invalidate(s_parent);
+    if (s_clockStageCb) s_clockStageCb(stage);
+}
+
+// Idle clock, once per sweep tick: apply a scene step when it changes; without a compositor
+// (simulator) also move the LVGL-drawn hands, and keep the LVGL sweep on the second hand so
+// that, after the exit, the radar sweep goes on from where the hand was.
+static void clock_tick() {
+    if (s_clock.phase() == ClockFace::OFF && s_clockStage == 0) return;
+    const ClockFrame f = s_clock.frame(lv_tick_get(), clock_wall());
+    apply_clock_stage(f.stage);
+    if (s_compConfig) return;                  // the compositor draws everything that moves
+    s_lvClock = f;
+    const float prev = s_sweepDeg;
+    s_sweepDeg = f.leadDeg;
+    if (s_sweep && s_sweepEnabled && !orb()) {
+        lv_area_t a, b;
+        wedge_bbox(prev, &a);
+        wedge_bbox(s_sweepDeg, &b);
+        area_union(a, b);
+        lv_obj_invalidate_area(s_sweep, &a);
+    }
+    if (s_clockLayer && f.stage != 0) lv_obj_invalidate(s_clockLayer);
+}
+
 static void sweep_timer_cb(lv_timer_t *t) {
     (void)t;
     if (++s_frameCtr % 3 == 0) interp_step();         // smooth glyph motion (~90 ms cadence)
+    clock_tick();                                      // before the Orb / sweep-off returns below
     if (orb()) {
         // animate the blip waves (invalidate only the ball areas)
         s_wavePhase += 0.05f;
@@ -384,6 +477,7 @@ static void sweep_timer_cb(lv_timer_t *t) {
         return;
     }
     if (!s_sweepEnabled) return;          // sweep disabled: glyph interpolation above still runs
+    if (s_clockStage != 0 && !s_compConfig) return;   // clock_tick() drives the LVGL sweep
     s_prevSweepDeg = s_sweepDeg;
     s_sweepDeg += 360.0f * (float)SWEEP_FRAME_MS / (float)SWEEP_PERIOD_MS;
     if (s_sweepDeg >= 360.0f) s_sweepDeg -= 360.0f;
@@ -407,7 +501,7 @@ static void draw_trail(lv_draw_ctx_t *d, const AcDraw &ac, lv_color_t col) {
     t.color = col;
     t.width = 2;
     for (int i = 1; i < n; ++i) {
-        t.opa = (lv_opa_t)(10 + 45 * i / n);
+        t.opa = dim(10 + 45 * i / n);
         lv_point_t a = ac.trail[i - 1], b = ac.trail[i];
         lv_draw_line(d, &t, &a, &b);
     }
@@ -422,7 +516,7 @@ static void draw_ball(lv_draw_ctx_t *d, const AcDraw &ac) {
     for (int wv = 0; wv < 3; ++wv) {
         float ph = s_wavePhase + (float)wv * 0.34f;
         if (ph >= 1.0f) ph -= 1.0f;
-        w.opa = (lv_opa_t)((1.0f - ph) * 245.0f);
+        w.opa = dim((int)((1.0f - ph) * 245.0f));
         if (w.opa > 6) lv_draw_arc(d, &w, &ac.pos, (uint16_t)(BALL_R + 3 + ph * WAVE_EXPAND), 0, 360);
     }
 
@@ -430,11 +524,11 @@ static void draw_ball(lv_draw_ctx_t *d, const AcDraw &ac) {
     lv_draw_rect_dsc_t b;
     lv_draw_rect_dsc_init(&b);
     b.bg_color = ac.emergency ? ORB_EMERG : ORB_BLIP;
-    b.bg_opa = LV_OPA_COVER;
+    b.bg_opa = dim(LV_OPA_COVER);
     b.radius = LV_RADIUS_CIRCLE;
     b.border_color = lv_color_hex(0x7A5A00);
     b.border_width = 1;
-    b.border_opa = 150;
+    b.border_opa = dim(150);
     lv_area_t r = { (lv_coord_t)(ac.pos.x - BALL_R), (lv_coord_t)(ac.pos.y - BALL_R),
                     (lv_coord_t)(ac.pos.x + BALL_R), (lv_coord_t)(ac.pos.y + BALL_R) };
     lv_draw_rect(d, &b, &r);
@@ -443,7 +537,7 @@ static void draw_ball(lv_draw_ctx_t *d, const AcDraw &ac) {
     lv_draw_rect_dsc_t hl;
     lv_draw_rect_dsc_init(&hl);
     hl.bg_color = lv_color_hex(0xFFFBCC);
-    hl.bg_opa = 170;
+    hl.bg_opa = dim(170);
     hl.radius = LV_RADIUS_CIRCLE;
     lv_area_t hr = { (lv_coord_t)(ac.pos.x - 5), (lv_coord_t)(ac.pos.y - 6),
                      (lv_coord_t)(ac.pos.x - 1), (lv_coord_t)(ac.pos.y - 2) };
@@ -455,7 +549,7 @@ static void draw_offrange(lv_draw_ctx_t *d, const AcDraw &ac) {
     lv_draw_rect_dsc_t b;
     lv_draw_rect_dsc_init(&b);
     b.bg_color = ac.emergency ? ORB_EMERG : ORB_BLIP;
-    b.bg_opa = LV_OPA_COVER;
+    b.bg_opa = dim(LV_OPA_COVER);
     b.radius = LV_RADIUS_CIRCLE;
     lv_area_t r = { (lv_coord_t)(ac.pos.x - 5), (lv_coord_t)(ac.pos.y - 5),
                     (lv_coord_t)(ac.pos.x + 5), (lv_coord_t)(ac.pos.y + 5) };
@@ -470,7 +564,7 @@ static void draw_offrange(lv_draw_ctx_t *d, const AcDraw &ac) {
     lv_draw_rect_dsc_t td;
     lv_draw_rect_dsc_init(&td);
     td.bg_color = ORB_ACCENT;
-    td.bg_opa = LV_OPA_COVER;
+    td.bg_opa = dim(LV_OPA_COVER);
     lv_draw_polygon(d, &td, tri, 3);
 }
 
@@ -500,12 +594,12 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_draw_rect_dsc_t g;
             lv_draw_rect_dsc_init(&g);
             g.bg_color = ac.emergency ? COL_EMERG_CORE : ac.color;   // white core, see define
-            g.bg_opa = LV_OPA_COVER;
+            g.bg_opa = dim(LV_OPA_COVER);
             lv_draw_polygon(d, &g, pts, 4);
             if (ac.emergency) {
                 lv_draw_arc_dsc_t h;
                 lv_draw_arc_dsc_init(&h);
-                h.color = COL_EMERG; h.width = 3; h.opa = 255;
+                h.color = COL_EMERG; h.width = 3; h.opa = dim(255);
                 lv_draw_arc(d, &h, &ac.pos, 16, 0, 360);
             }
         }
@@ -515,7 +609,7 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_draw_arc_dsc_t sr;
             lv_draw_arc_dsc_init(&sr);
             sr.width = 2;
-            sr.opa = 240;
+            sr.opa = dim(240);
             if (drg) {
                 sr.color = ORB_ACCENT;
                 lv_draw_arc(d, &sr, &ac.pos, 15, 0, 360);
@@ -526,8 +620,9 @@ static void ac_draw_cb(lv_event_t *e) {
             }
         }
 
-        // floating labels (phosphor only; orb keeps clean balls + the tap card)
-        if (!drg) {
+        // floating labels (phosphor only; orb keeps clean balls + the tap card; the clock
+        // hides them so the hands read cleanly)
+        if (!drg && s_labelsOn) {
             lv_draw_label_dsc_t lc;
             lv_draw_label_dsc_init(&lc);
             lc.font = s_bigText ? &lv_font_montserrat_18 : &lv_font_montserrat_14;
@@ -543,6 +638,106 @@ static void ac_draw_cb(lv_event_t *e) {
             if (ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);
         }
     });
+}
+
+// =============================== idle clock ==================================
+// An hour or minute hand from the centre: a dark outline under the ink, so it reads over
+// the (dimmed) planes. Simulator only; the compositor draws the same on the device.
+static void draw_clock_hand(lv_draw_ctx_t *d, float deg, float len, int w) {
+    const lv_point_t c = { s_cx, s_cy };
+    const lv_point_t tip = rim_point(deg, len);
+    lv_draw_line_dsc_t l;
+    lv_draw_line_dsc_init(&l);
+    l.round_start = 1;
+    l.round_end = 1;
+    l.color = lv_color_black();
+    l.width = (lv_coord_t)(w + CLOCK_OUTLINE_W);
+    l.opa = CLOCK_OUTLINE_OPA;
+    lv_draw_line(d, &l, &c, &tip);
+    l.color = s_cInk;
+    l.width = (lv_coord_t)w;
+    l.opa = LV_OPA_COVER;
+    lv_draw_line(d, &l, &c, &tip);
+}
+
+// The dial: fine minute marks, hour marks, and 12/3/6/9 where N/E/S/W were. It never
+// moves, so it stays dim (AMOLED burn-in). Without a compositor this layer also draws the
+// hands, the second hand and the centre cap from the last ClockFrame.
+static void clock_draw_cb(lv_event_t *e) {
+    lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
+    const float R = (float)RADAR_R_OUTER_PX;
+    if (s_dialOpa) {
+        const auto scaled = [](int opa) { return (lv_opa_t)((opa * s_dialOpa + 127) / 255); };
+        lv_draw_line_dsc_t m;
+        lv_draw_line_dsc_init(&m);
+        m.color = s_cSoft;
+        m.width = 1;
+        m.opa = scaled(CLOCK_MTICK_OPA);
+        for (int i = 0; i < 60; ++i) {
+            if (i % 5 == 0) continue;                    // the hours have their own marks
+            const lv_point_t a = rim_point(i * 6.0f, R * CLOCK_MTICK_R0);
+            const lv_point_t b = rim_point(i * 6.0f, R * CLOCK_TICK_R1);
+            lv_draw_line(d, &m, &a, &b);
+        }
+        lv_draw_line_dsc_t h;
+        lv_draw_line_dsc_init(&h);
+        h.color = s_cInk;
+        h.width = 3;
+        h.opa = scaled(CLOCK_HTICK_OPA);
+        for (int i = 0; i < 12; ++i) {
+            if (i % 3 == 0) continue;                    // 12, 3, 6 and 9 are numbers
+            const lv_point_t a = rim_point(i * 30.0f, R * CLOCK_HTICK_R0);
+            const lv_point_t b = rim_point(i * 30.0f, R * CLOCK_TICK_R1);
+            lv_draw_line(d, &h, &a, &b);
+        }
+        lv_draw_label_dsc_t n;
+        lv_draw_label_dsc_init(&n);
+        n.font = &lv_font_montserrat_28;
+        n.color = s_cInk;
+        n.opa = scaled(CLOCK_NUM_OPA);
+        n.align = LV_TEXT_ALIGN_CENTER;
+        const lv_coord_t lh = lv_font_get_line_height(n.font);
+        static const char *const NUM[4] = { "12", "3", "6", "9" };
+        for (int i = 0; i < 4; ++i) {
+            const lv_point_t c = rim_point(i * 90.0f, R * CLOCK_NUM_R);
+            const lv_area_t a = { (lv_coord_t)(c.x - 30), (lv_coord_t)(c.y - lh / 2),
+                                  (lv_coord_t)(c.x + 30), (lv_coord_t)(c.y - lh / 2 + lh - 1) };
+            lv_draw_label(d, &n, &a, NUM[i], NULL);
+        }
+    }
+    if (s_compConfig) return;                            // device: the compositor draws the hands
+    const ClockFrame &f = s_lvClock;
+    if (f.grow > 0.001f) {
+        draw_clock_hand(d, f.hourDeg, R * CLOCK_HOUR_LEN * f.grow, CLOCK_HOUR_W);
+        draw_clock_hand(d, f.minDeg, R * CLOCK_MIN_LEN * f.grow, CLOCK_MIN_W);
+    }
+    if (f.leadLen > 0.001f) {
+        lv_draw_line_dsc_t s;
+        lv_draw_line_dsc_init(&s);
+        s.color = clock_lead_color();
+        s.width = (lv_coord_t)lroundf(f.leadW);
+        s.opa = SWEEP_LEAD_OPA;
+        s.round_start = 1;
+        s.round_end = 1;
+        const lv_point_t tail = rim_point(f.leadDeg + 180.0f, R * f.leadTail);
+        const lv_point_t tip = rim_point(f.leadDeg, R * f.leadLen);
+        lv_draw_line(d, &s, &tail, &tip);
+    }
+    if (f.capR > 0) {
+        lv_draw_rect_dsc_t cap;
+        lv_draw_rect_dsc_init(&cap);
+        cap.radius = LV_RADIUS_CIRCLE;
+        cap.bg_color = s_cInk;
+        cap.bg_opa = LV_OPA_COVER;
+        const lv_coord_t r = (lv_coord_t)lroundf(f.capR);
+        lv_area_t a = { (lv_coord_t)(s_cx - r), (lv_coord_t)(s_cy - r), (lv_coord_t)(s_cx + r), (lv_coord_t)(s_cy + r) };
+        lv_draw_rect(d, &cap, &a);
+        cap.bg_color = clock_lead_color();
+        cap.bg_opa = (lv_opa_t)lroundf(f.capDot * 255.0f);
+        a = { (lv_coord_t)(s_cx - CLOCK_CAP_DOT_R), (lv_coord_t)(s_cy - CLOCK_CAP_DOT_R),
+              (lv_coord_t)(s_cx + CLOCK_CAP_DOT_R), (lv_coord_t)(s_cy + CLOCK_CAP_DOT_R) };
+        lv_draw_rect(d, &cap, &a);
+    }
 }
 
 // =============================== helpers =====================================
@@ -577,8 +772,6 @@ static void pulse_anim_cb(void *obj, int32_t v) {
 
 namespace radar {
 
-static void sweep_sync();
-
 void setTheme(int t) {
     s_theme = ((t % THEME_COUNT) + THEME_COUNT) % THEME_COUNT;
     const bool drg = orb();
@@ -603,10 +796,10 @@ void setTheme(int t) {
             lv_obj_set_style_bg_color(s_parent, lv_color_black(), 0);
             lv_obj_set_style_bg_grad_dir(s_parent, LV_GRAD_DIR_NONE, 0);
         }
-        lv_obj_set_style_bg_opa(s_parent, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_opa(s_parent, drg ? s_dimOpa : LV_OPA_COVER, 0);   // Orb's gradient dims behind the clock
     }
     for (int i = 0; i < 4; ++i) show(s_rose[i], !drg);   // hide compass in Orb
-    show(s_rangeLbl, !drg && s_rangeLblVisible);
+    show(s_rangeLbl, !drg && s_rangeLblVisible && s_clockStage == 0);
     show(s_centerDot, !drg);                             // orb draws an orange triangle instead
 
     // retint the persistent chrome objects for the active palette
@@ -625,19 +818,21 @@ void setTheme(int t) {
 int  theme() { return s_theme; }
 void cycleTheme() { setTheme(s_theme + 1); }
 void setThemeChangedCb(void (*cb)(int)) { s_themeCb = cb; }
-void setRangeLabelVisible(bool v) { s_rangeLblVisible = v; if (s_rangeLbl) show(s_rangeLbl, v && !orb()); }
+void setRangeLabelVisible(bool v) { s_rangeLblVisible = v; if (s_rangeLbl) show(s_rangeLbl, v && !orb() && s_clockStage == 0); }
 
 // Show the LVGL sweep and centre ripple, or hand colours + on/off to the compositor when
-// it owns them.
+// it owns them. The ripple pauses while the clock is up (the cap sits there). The lead
+// colour is also the clock's second hand, which needs orange in Orb (no sweep there).
 static void sweep_sync() {
+    const bool clockUp = s_clockStage != 0;
     if (s_compConfig)
-        s_compConfig(lv_color_to16(s_cRing), lv_color_to16(s_cLead), lv_color_to16(s_cInk),
-                     s_sweepEnabled && !orb(), !orb());
+        s_compConfig(lv_color_to16(s_cRing), lv_color_to16(clock_lead_color()), lv_color_to16(s_cInk),
+                     s_sweepEnabled && !orb(), !orb() && !clockUp);
     if (s_sweep) {
         show(s_sweep, s_sweepEnabled && !s_compConfig);
         lv_obj_invalidate(s_sweep);            // clear any LVGL wedge currently painted
     }
-    if (s_pulse) show(s_pulse, !orb() && !s_compConfig);   // orb draws an orange triangle instead
+    if (s_pulse) show(s_pulse, !orb() && !s_compConfig && !clockUp);   // orb draws an orange triangle instead
 }
 
 void setSweepEnabled(bool on) {
@@ -645,9 +840,11 @@ void setSweepEnabled(bool on) {
     sweep_sync();
 }
 
-void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse), void (*tick)()) {
+void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse),
+                        void (*tick)(), float (*angle)()) {
     s_compConfig = config;
     s_compTick = tick;
+    s_compAngle = angle;
     sweep_sync();
 }
 bool sweepEnabled() { return s_sweepEnabled; }
@@ -762,6 +959,9 @@ void init(void *lv_parent) {
     lv_obj_set_style_bg_color(s_centerDot, COL_INK, 0);
     lv_obj_set_style_bg_opa(s_centerDot, LV_OPA_COVER, 0);
     lv_obj_clear_flag(s_centerDot, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    s_clockLayer = make_layer(parent, clock_draw_cb);   // idle clock: on top of the scope
+    show(s_clockLayer, false);
 
     s_sweepDeg = 0.0f;
     s_prevSweepDeg = 0.0f;
@@ -971,5 +1171,45 @@ bool info(int idx, AcInfo &out) {
 }
 
 void tickSweep() { /* sweep self-animates via lv_timer */ }
+
+// ---- idle clock ----
+bool setClock(bool on) {
+    const uint32_t now = lv_tick_get();
+    if (!on) {
+        if (s_clock.requested()) s_clock.exit(now, clock_wall());
+        return true;
+    }
+    if (s_clock.requested()) return true;
+    ClockHands wall;
+    if (!s_clockTime(wall)) return false;                // time unknown: no clock face
+    s_wall = wall;
+    // Morph from whichever sweep is on screen: the compositor's, or LVGL's in the simulator.
+    const bool comp = s_compConfig != nullptr;
+    const float deg = comp ? (s_compAngle ? s_compAngle() : 0.0f) : s_sweepDeg;
+    const float dps = 360000.0f / (float)(comp ? SWEEP_COMP_PERIOD_MS : SWEEP_PERIOD_MS);
+    return s_clock.enter(now, deg, dps, s_sweepEnabled && !orb(), wall);   // false while still leaving
+}
+
+bool clockRequested() { return s_clock.requested(); }
+
+float clockProgress() {
+    if (s_clock.phase() == ClockFace::OFF) return 0.0f;
+    return s_clock.frame(lv_tick_get(), clock_wall()).p;
+}
+
+bool clockFrame(ClockFrame &out) {
+    if (s_clock.phase() == ClockFace::OFF) return false;
+    out = s_clock.frame(lv_tick_get(), clock_wall());
+    return true;
+}
+
+bool emergencyInRange() {
+    for (const AcDraw &a : s_acs)
+        if (a.inRange && a.emergency) return true;
+    return false;
+}
+
+void setClockTimeSource(bool (*fn)(ClockHands &out)) { s_clockTime = fn ? fn : clock_time_now; }
+void setClockStageCb(void (*cb)(int stage)) { s_clockStageCb = cb; }
 
 } // namespace radar

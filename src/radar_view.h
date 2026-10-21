@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <vector>
 #include "aircraft.h"
+#include "clock_face.h"
 
 struct RadarSettings {
     double homeLat, homeLon;
@@ -72,8 +73,10 @@ void setRangeLabelVisible(bool v);               // hide the built-in range labe
 void setSweepEnabled(bool on);                   // show/hide the rotating sweep line
 // Hand the sweep to a per-pixel compositor (device: display.cpp). config gets the theme's
 // ring/lead colours (RGB565) and whether a sweep should show; tick is called during long
-// rebuilds so the sweep keeps moving. Without it, LVGL draws the sweep.
-void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse), void (*tick)());
+// rebuilds so the sweep keeps moving; angle returns where its sweep line is (degrees,
+// 0 = up), so the idle clock can start from it. Without it, LVGL draws the sweep.
+void setSweepCompositor(void (*config)(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep, bool pulse),
+                        void (*tick)(), float (*angle)());
 bool sweepEnabled();
 void setAirportsEnabled(bool on);                // show/hide airport markers on the scope
 bool airportsEnabled();
@@ -81,5 +84,17 @@ void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=lon
 void setMaxOnScreen(int n);                       // how many (nearest) aircraft to draw on the scope
 void setLargeText(bool on);                       // accessibility: bigger glyph labels. Call BEFORE init()
 void setUnits(int preset);                       // 0 = feet · 1 = metres (scope altitude labels; same presets as ui_set_units)
+
+// Idle clock (clock_face.h): the radar turns into an analog clock and back.
+// setClock(true) starts the radar -> clock animation, setClock(false) the way back. It
+// returns false when the clock cannot start: the time is unknown, or the clock is still
+// animating away (ask again).
+bool  setClock(bool on);
+bool  clockRequested();                     // entering or shown
+float clockProgress();                      // 0 = radar ... 1 = clock, animated (brightness ramp)
+bool  clockFrame(ClockFrame& out);          // compositor: the frame now; false when the clock is off
+bool  emergencyInRange();                   // an in-range aircraft squawks 7500/7600/7700
+void  setClockTimeSource(bool (*fn)(ClockHands& out));   // default: the system's local time
+void  setClockStageCb(void (*cb)(int stage));            // scene step changed (ClockFrame::stage)
 
 } // namespace radar

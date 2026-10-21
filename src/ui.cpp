@@ -142,13 +142,17 @@ static void fold_ascii(char *s) {
 }
 
 // ----------------------------------------------------------------- detail card
+// Idle clock up (radar_view scene step >= 1): the HUD, zoom button and card make way for it.
+static bool s_clockUp = false;
+
 static void refresh_card(void) {
     AcInfo in;
-    if (!radar::selected(in)) {
+    const bool sel = radar::selected(in);
+    if (s_clockUp || !sel) {
         lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         if (s_photo)       lv_obj_add_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
         if (s_photoCredit) lv_obj_add_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
-        s_lastRouteReq[0] = 0;
+        if (!sel) s_lastRouteReq[0] = 0;
         return;
     }
     lv_obj_clear_flag(s_card, LV_OBJ_FLAG_HIDDEN);
@@ -766,6 +770,34 @@ void ui_set_weather_forecast(bool forecast) {
 static void (*s_viewChangedCb)(int) = nullptr;
 void ui_set_view_changed_cb(void (*cb)(int idx)) { s_viewChangedCb = cb; }
 
+// ---------------------------------------------------------------- idle clock
+// radar_view's scene steps. From the first one the HUD, the zoom button and the card make
+// way for the dial, and a transparent layer on top takes the touch that wakes the radar, so
+// that touch does not also select a plane, swipe a view or change the theme. LVGL counts the
+// press as activity, which is what makes main.cpp send the clock away.
+static lv_obj_t *s_clockCatcher = nullptr;
+
+static void clock_stage_cb(int stage) {
+    const bool up = stage != 0;
+    if (up == s_clockUp) return;
+    s_clockUp = up;
+    lv_obj_t *chrome[] = { s_hudWifi, s_hudGps, s_hudCount, s_hudClock, s_hudBatt, s_hudDate, s_zoomBtn };
+    for (lv_obj_t *o : chrome) {
+        if (!o) continue;
+        if (up) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+    refresh_card();                         // hides the card while the clock is up, restores it after
+    if (!s_clockCatcher) return;
+    if (up) lv_obj_clear_flag(s_clockCatcher, LV_OBJ_FLAG_HIDDEN);
+    else if (!lv_obj_has_state(s_clockCatcher, LV_STATE_PRESSED))
+        lv_obj_add_flag(s_clockCatcher, LV_OBJ_FLAG_HIDDEN);   // still pressed: hidden on release
+}
+
+static void clock_catcher_release_cb(lv_event_t *e) {
+    if (!s_clockUp) lv_obj_add_flag(lv_event_get_target(e), LV_OBJ_FLAG_HIDDEN);
+}
+
 // Sweep compositor hooks (polled by display.cpp every loop pass).
 bool ui_sweep_visible(void) {
     return s_tv && lv_tileview_get_tile_act(s_tv) == s_tileRadar && !lv_obj_is_scrolling(s_tv);
@@ -1065,6 +1097,16 @@ void ui_create(void) {
     lv_obj_set_style_text_opa(s_hudDate, 140, 0);
     lv_label_set_text(s_hudDate, "");
     lv_obj_align(s_hudDate, LV_ALIGN_TOP_MID, 0, 70);
+
+    // idle clock: a transparent layer above everything takes the touch that wakes the radar
+    s_clockCatcher = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_clockCatcher);
+    lv_obj_set_size(s_clockCatcher, SCREEN_W, SCREEN_H);
+    lv_obj_clear_flag(s_clockCatcher, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN);
+    lv_obj_add_flag(s_clockCatcher, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_clockCatcher, clock_catcher_release_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(s_clockCatcher, clock_catcher_release_cb, LV_EVENT_PRESS_LOST, NULL);
+    radar::setClockStageCb(clock_stage_cb);
 
     // --- list tile (circular panel, clipped to the round screen) ---
     lv_obj_t *lp = make_round_panel(s_tileList);

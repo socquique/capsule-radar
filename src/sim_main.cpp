@@ -140,6 +140,31 @@ static void mock_step(double dt) {
     }
 }
 
+// Idle clock. Screenshots use the classic watch pose (10:09:32.5) so every run matches;
+// the CLOCK_DEMO GIF runs from 10:09:30 at the real pace.
+static bool sim_clock_fixed(ClockHands &out) { out = clock_hands(10, 9, 32, 500); return true; }
+static bool sim_clock_running(ClockHands &out) {
+    const Uint32 ms = 30000 + SDL_GetTicks();
+    out = clock_hands(10, 9 + (int)(ms / 60000), (int)(ms / 1000 % 60), (int)(ms % 1000));
+    return true;
+}
+
+// Save what LVGL last rendered as <prefix>-<name>.bmp.
+static void save_shot(const char *prefix, const char *name) {
+    int ow, oh;
+    SDL_GetRendererOutputSize(s_ren, &ow, &oh);
+    SDL_RenderClear(s_ren);
+    SDL_RenderCopy(s_ren, s_tex, NULL, NULL);
+    SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!surf) return;
+    SDL_RenderReadPixels(s_ren, NULL, SDL_PIXELFORMAT_ARGB8888, surf->pixels, surf->pitch);
+    char path[300];
+    snprintf(path, sizeof(path), "%s-%s.bmp", prefix, name);
+    SDL_SaveBMP(surf, path);
+    SDL_FreeSurface(surf);
+    printf("[sim] saved %s\n", path);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -309,12 +334,17 @@ int main(int argc, char **argv) {
             }
         }
 
-        // animated GIF capture (--gif <prefix>): grab frames after the splash fades
+        // animated GIF capture (--gif <prefix>): grab frames after the splash fades.
+        // CLOCK_DEMO=1: the radar turns into the idle clock at the first frame and back at
+        // frame 55 (~3 s), so the GIF shows both animations.
         static Uint32 lastGif = 0;
         static int gifFrame = 0;
+        static const bool clockDemo = getenv("CLOCK_DEMO") != NULL;
         if (gifPath && now - start > 3000 && now - lastGif >= 55) {
             lastGif = now;
-            if (gifFrame >= 60) { run = false; }
+            if (clockDemo && gifFrame == 0) { radar::setClockTimeSource(sim_clock_running); radar::setClock(true); }
+            if (clockDemo && gifFrame == 55) radar::setClock(false);
+            if (gifFrame >= (clockDemo ? 90 : 60)) { run = false; }
             else {
                 SDL_RenderClear(s_ren); SDL_RenderCopy(s_ren, s_tex, NULL, NULL);
                 int ow, oh; SDL_GetRendererOutputSize(s_ren, &ow, &oh);
@@ -371,6 +401,23 @@ int main(int argc, char **argv) {
                     SDL_FreeSurface(surf);
                     printf("[sim] saved %s\n", path);
                 }
+            }
+            // the idle clock, fully entered, on the radar view
+            radar::setClockTimeSource(sim_clock_fixed);
+            ui_show_view(0);
+            const struct { const char *name; int theme; } clocks[3] = {
+                { "clock", THEME_PHOSPHOR }, { "clock-orb", THEME_ORB }, { "clock-military", THEME_MILITARY },
+            };
+            for (const auto &c : clocks) {
+                radar::setTheme(c.theme);
+                radar::setClock(true);
+                lv_tick_inc(CLOCK_ENTER_MS + 100);       // jump to the end of the entry
+                lv_timer_handler();
+                lv_refr_now(NULL);
+                save_shot(shotPath, c.name);
+                radar::setClock(false);
+                lv_tick_inc(CLOCK_EXIT_MS + 100);
+                lv_timer_handler();
             }
             ui_set_units(0);
             radar::setTheme(THEME_PHOSPHOR);

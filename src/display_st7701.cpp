@@ -341,6 +341,7 @@ uint16_t rotation() { return s_rot; }
 bool sweepAvailable() { return false; }
 void sweepConfig(uint16_t, uint16_t, uint16_t, bool, bool) {}
 void sweepTick() {}
+float sweepAngleDeg() { return 0.0f; }   // never asked: sweepAvailable() is false here
 
 uint32_t inactiveMs() { return s_ready ? lv_disp_get_inactive_time(NULL) : 0; }
 
