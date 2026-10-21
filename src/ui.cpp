@@ -997,6 +997,14 @@ void ui_show_view(int idx) {
     if (s_tv && idx >= 0 && idx <= 3) lv_obj_set_tile_id(s_tv, (uint32_t)idx, 0, LV_ANIM_OFF);
 }
 
+// GET /perf?bench=1 (perf.cpp): an animated page change, as a swipe ends with, and whether
+// the tileview is still moving (lv_obj_is_scrolling() sees finger scrolls only, not anims).
+void ui_bench_page(int idx) {
+    if (s_tv && idx >= 0 && idx <= 3) lv_obj_set_tile_id(s_tv, (uint32_t)idx, 0, LV_ANIM_ON);
+}
+bool ui_bench_moving(void) { return s_tv && (lv_anim_get(s_tv, nullptr) || lv_obj_is_scrolling(s_tv)); }
+int  ui_bench_view(void) { return active_view_index(); }
+
 // ------------------------------------------------------------------- splash
 static void splash_fade_cb(void *obj, int32_t v) { lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)v, 0); }
 static void splash_del_cb(lv_anim_t *a) { lv_obj_del((lv_obj_t *)a->var); }

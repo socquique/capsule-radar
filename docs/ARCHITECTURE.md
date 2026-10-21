@@ -22,6 +22,13 @@ second measured on a 1.75).
 JSON documents are parsed with a PSRAM allocator (`adsb_client.cpp`) and mbedTLS buffers are
 routed to PSRAM (`mbedtls_platform_set_calloc_free`, `main.cpp`), so TLS never starves internal RAM.
 
+### Render-path timing (GET /perf)
+`perf.cpp` keeps a count, a total and a maximum for each kind of work on the LVGL core: LVGL
+timers, flushes, panel pushes, compositor ticks, feed updates, GPS, web and touch sampling. Reading
+`GET /perf` prints them and resets the maxima. `GET /perf?bench=1` also repaints the whole screen
+and pages radar → list → radar twice; it needs the `X-Radar` page header, like the live settings.
+Measure here before and after any render-path change, on the device.
+
 ### Idle clock
 `clock_face.h` is the animation model (pure, host-tested in `tests/clock_face_test.cpp`): from
 the radar's sweep angle and the wall clock it gives, per moment, a `ClockFrame` — the sweep

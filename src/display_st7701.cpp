@@ -11,6 +11,7 @@
 #include "display.h"
 #include "radar_view.h"
 #include "ui.h"
+#include "perf.h"
 #include "touch_cst820.h"
 #include "touch_queue.h"
 #include <math.h>
@@ -230,6 +231,7 @@ static bool rgb_panel_begin() {
 // panel frame, which is not visible; the AMOLED panel, too, shows its memory while it is
 // written. Whole frames are page-flipped instead (flush_cb).
 static void panel_push(int16_t x, int16_t y, uint16_t *pixels, uint16_t w, uint16_t h) {
+    perf::Scope t(perf::PUSH);
     if (!s_fb[0]) return;
     uint16_t *fb = (uint16_t *)s_fb[s_back ^ 1];
     for (int row = 0; row < h; ++row)
@@ -663,6 +665,7 @@ static void compose_step() {
     bool anyOn = s_trailOn || s_leadOn || s_pulseOn;
     for (const Part &p : s_part) anyOn = anyOn || p.on;
     if (!sweepOn && !pulseOn && !clk && !anyOn) return;   // nothing to draw, nothing to clear
+    perf::Scope t(perf::COMPOSE);
     // Advance by elapsed time, but never more than SWEEP_MAX_STEP_MS per tick: a blocked
     // loop (GPS read, full repaint) then pauses the sweep briefly instead of making it jump.
     uint32_t dt = anyOn ? now - s_lastComposeMs : 0;
@@ -776,6 +779,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
     compose_step();
     // Sample the touch panel too: LVGL reads it only between frames (see touch_queue.h).
     touch_sample(false);
+    perf::Scope t(perf::FLUSH);
     if (!drv->full_refresh) {
         flush_area(area, px);
         if (lv_disp_flush_is_last(drv)) s_frameCount++;
@@ -822,6 +826,12 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
     lv_disp_flush_ready(drv);
 }
 
+// LVGL monitor_cb: one screen refresh done (GET /perf).
+static void monitor_cb(lv_disp_drv_t *drv, uint32_t ms, uint32_t px) {
+    (void)drv;
+    perf::refresh(ms, px);
+}
+
 // CST820 touch -> TouchQueue -> LVGL pointer, undoing the display rotation (mirror of
 // display.cpp). With the sweep compositor busy, LVGL renders only a few frames a second
 // and reads touch only between them, so a quick tap could fall between two reads.
@@ -835,6 +845,7 @@ static void touch_sample(bool force) {
     if (!s_touchOk) return;
     const uint32_t now = millis();
     if (!force && now - s_touchLastMs < TOUCH_SAMPLE_MS) return;
+    if (s_touchLastMs) perf::add(perf::TOUCH_GAP, (now - s_touchLastMs) * 1000);
     s_touchLastMs = now;
     uint16_t x = 0, y = 0;
     const TouchRead state = touch_read(&x, &y);
@@ -928,6 +939,7 @@ bool begin() {
     s_disp_drv.hor_res      = SCREEN_W;
     s_disp_drv.ver_res      = SCREEN_H;
     s_disp_drv.flush_cb     = flush_cb;
+    s_disp_drv.monitor_cb   = monitor_cb;       // GET /perf: refresh timing
     s_disp_drv.draw_buf     = &s_draw_buf;
     s_disp_drv.full_refresh = (s_rot % 90) ? 1 : 0;   // partial refresh unless the angle needs whole frames
     set_draw_buf_size();
@@ -951,7 +963,10 @@ bool begin() {
 void loop() {
     if (!s_ready) return;
     if (sweep_ready()) sweep_poll_ui();
-    lv_timer_handler();
+    {
+        perf::Scope t(perf::LVGL);
+        lv_timer_handler();
+    }
     compose_step();
 }
 

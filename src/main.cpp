@@ -22,6 +22,7 @@
 #include "radar_view.h"
 #include "ui.h"
 #include "display.h"                  // M0: CO5300 + LVGL bring-up
+#include "perf.h"                     // render-path timing counters (GET /perf)
 #include "imu_qmi8658.h"             // face-down sleep: accelerometer reads
 #include "facedown_sleep.h"          // face-down sleep: the decision
 #include "gps.h"                     // LC76G GNSS (-G variant only)
@@ -1117,6 +1118,19 @@ static void handleGps() {   // auto-set the centre point from the LC76G GPS (-G 
     g_web.send(200, "text/plain", "ok");
 }
 
+// Render-path timing counters (perf.h). Reading them only resets their maxima; ?bench=1 also
+// runs the benchmark, which pages the UI, so it needs the page header like a live setting.
+static void handlePerf() {
+    const bool bench = g_web.hasArg("bench");
+    if (bench && refuseUnlessPageFetch()) return;
+    static const size_t BUFSZ = 2048;
+    static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM, like the config page buffer
+    if (!buf) { g_web.send(500, "text/plain", "no memory"); return; }
+    size_t k = perf::report(buf, BUFSZ);
+    if (bench) perf::bench(buf + k, BUFSZ - k);
+    g_web.send(200, "text/plain", buf);
+}
+
 // ---- browser OTA: upload an app .bin over WiFi and self-flash ----
 static void handleUpdatePage() {
     g_web.send(200, "text/html",
@@ -1372,6 +1386,7 @@ void setup() {
 #endif
     });
     g_web.on("/gps", handleGps);
+    g_web.on("/perf", handlePerf);
     g_web.on("/units", handleUnits);
     g_web.on("/tempu", handleTempUnit);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
@@ -1398,12 +1413,19 @@ void setup() {
     Serial.println("setup done");
 }
 
-void loop() {
+// One pass of the main loop (timed as perf::LOOP; loop() adds the closing delay).
+static void loop_pass() {
     display::loop();                // drive LVGL (render dirty areas + run timers)
     audio_loop();                   // time the buzzer's beeps (boards with one)
     g_wm.process();                 // service the WiFi config portal (non-blocking)
-    g_web.handleClient();           // serve the configuration web page
-    if (g_useGps) gps_poll();       // pull NMEA from the LC76G (only when GPS auto-location is on)
+    {
+        perf::Scope t(perf::WEB);
+        g_web.handleClient();       // serve the configuration web page
+    }
+    if (g_useGps) {                 // pull NMEA from the LC76G (only when GPS auto-location is on)
+        perf::Scope t(perf::GPS);
+        gps_poll();
+    }
 
     // scheduled reboot after a fresh WiFi config (see setSaveConfigCallback)
     if (g_rebootAtMs && (int32_t)(millis() - g_rebootAtMs) >= 0) { delay(50); ESP.restart(); }
@@ -1454,9 +1476,12 @@ void loop() {
             g_snap.swap(g_aircraft);   // O(1) handoff under the lock; render on g_snap outside it.
             g_acDirty = false;         // g_aircraft now holds the previous snapshot (overwritten next poll)
             xSemaphoreGive(g_ac_mutex);
-            radar::update(g_snap, g_settings); // rebuild the glyph/trail layer
-            ui_on_data_updated();              // refresh card/list/stats
-            checkAudioEvents();                // ping new-in-range / emergency / military
+            {
+                perf::Scope t(perf::FEED);
+                radar::update(g_snap, g_settings); // rebuild the glyph/trail layer
+                ui_on_data_updated();              // refresh card/list/stats
+                checkAudioEvents();                // ping new-in-range / emergency / military
+            }
         }
     }
     if (g_weatherDirty) {
@@ -1575,5 +1600,12 @@ void loop() {
         Serial.println(showClock ? "[clock] idle: radar -> clock" : "[clock] radar is back");
     applyBrightness();
 
+}
+
+void loop() {
+    {
+        perf::Scope t(perf::LOOP);
+        loop_pass();
+    }
     delay(5);
 }
