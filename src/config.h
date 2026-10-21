@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.4.9-tcas.13"   // TCAS beta branch; bump on release
+#define FW_VERSION "1.5.0-tcas.14"   // TCAS beta branch; bump on release
 
 // ---------- Home location (default: Dénia, Spain) ----------
 // Overridable at runtime via the captive portal (stored in NVS).
