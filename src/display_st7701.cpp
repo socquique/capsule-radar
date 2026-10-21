@@ -243,6 +243,9 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     s_touchQueue.add(state == TOUCH_DOWN ? TouchQueue::DOWN :
                      state == TOUCH_UP ? TouchQueue::UP : TouchQueue::NODATA,
                      lx, ly, millis());
+    // A press held back from LVGL (wake-only) is still a touch: it restarts LVGL's
+    // inactivity time, which wakes the screen and keeps it lit while the finger rests.
+    if (state == TOUCH_DOWN && s_touchQueue.holding()) lv_disp_trig_activity(NULL);
     TouchQueue::Sample sample;
     if (!s_touchQueue.next(sample)) sample = s_touchQueue.delivered();
     data->point.x = sample.x;
@@ -323,6 +326,7 @@ void loop() { if (s_ready) lv_timer_handler(); }
 void setBrightness(uint8_t v) {
     const uint32_t maxDuty = (1u << LCD_BL_PWM_BITS) - 1u;
     ledcWrite(PIN_LCD_BL, (uint32_t)v * maxDuty / 255u);
+    s_touchQueue.setWakeOnly(v == 0);   // a dark panel takes a touch only as a wake-up (as display.cpp)
 }
 
 void setRotation(uint16_t degrees) {
