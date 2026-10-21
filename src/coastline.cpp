@@ -53,7 +53,8 @@ void coastline_project(double homeLat, double homeLon, double rangeKm,
     }
 }
 
-void coastline_draw(lv_draw_ctx_t *ctx, lv_color_t color, lv_opa_t opa, lv_coord_t width) {
+void coastline_draw(lv_draw_ctx_t *ctx, lv_color_t color, lv_opa_t opa, lv_coord_t width,
+                    const lv_area_t *clip) {
     if (s_lines.empty()) return;
     lv_draw_line_dsc_t d;
     lv_draw_line_dsc_init(&d);
@@ -63,8 +64,13 @@ void coastline_draw(lv_draw_ctx_t *ctx, lv_color_t color, lv_opa_t opa, lv_coord
     d.round_start = d.round_end = 1;   // smooth the joints on the thicker line
     for (const auto &line : s_lines) {
         for (size_t i = 1; i < line.size(); ++i) {
-            lv_point_t a = line[i - 1];
-            lv_point_t b = line[i];
+            const lv_point_t a = line[i - 1];
+            const lv_point_t b = line[i];
+            if (clip) {                // cheap reject: a segment that cannot touch the
+                const lv_coord_t pad = (lv_coord_t)(width + 1);   // anti-aliased stroke
+                if (LV_MAX(a.x, b.x) + pad < clip->x1 || LV_MIN(a.x, b.x) - pad > clip->x2 ||
+                    LV_MAX(a.y, b.y) + pad < clip->y1 || LV_MIN(a.y, b.y) - pad > clip->y2) continue;
+            }
             lv_draw_line(ctx, &d, &a, &b);
         }
     }

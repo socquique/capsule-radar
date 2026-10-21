@@ -14,9 +14,14 @@
 - Allocate LVGL draw buffers in PSRAM (`heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`); keep partial-render buffers if full-frame proves heavy.
 
 ## Rendering the scope
-The scope is an LVGL canvas in `radar_view.cpp`: rings, rose, crosshair, altitude-colored
-glyphs rotated by `track`, fading trails and a persistent flow layer. The animated sweep is
-composited per-pixel by `display.cpp` (angular fade over the canvas, fixed-point math,
+The scope's static part is one full-screen RGB565 cache in `radar_view.cpp`, shown by one image
+at the bottom of the tile: the background, the persistent flow tracks, and the coastline, airports,
+rings and crosshair. `cache_render_rect()` re-renders only the rects where flow segments were added
+or pruned, and a full re-render happens on a theme, airport, trail-length, clock-dim or scope change.
+Each poll invalidates only the boxes the drawn aircraft cover before and after it (glyph and rings,
+Orb waves, trail, labels), not the whole layer. Glyphs, trails and labels are drawn on top of the
+cache each frame. The animated sweep is
+composited per-pixel by `display.cpp` (angular fade over the cache, fixed-point math,
 partial-refresh masks) on a 30 ms tick (`SWEEP_FRAME_MS` in `config.h`; about 28 updates per
 second measured on a 1.75).
 JSON documents are parsed with a PSRAM allocator (`adsb_client.cpp`) and mbedTLS buffers are
