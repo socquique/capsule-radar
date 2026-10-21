@@ -1,7 +1,8 @@
 // Touch replay queue (src/touch_queue.h). LVGL reads the pointer only between frames, so the
 // device samples the panel between flush strips and replays the samples in order. These
 // checks guard what LVGL must see: the whole path in order, a lift where the finger was,
-// no lift from a failed read, and a bounded queue that keeps the newest position.
+// no lift from a failed read, a bounded queue that keeps the newest position, and, while the
+// screen is dark, no press at all (wake-only).
 #include "touch_queue.h"
 
 #include <assert.h>
@@ -133,5 +134,73 @@ int main() {
         assert(q.next(s) && same(s, 230, 230, true));
         assert(q.next(s) && same(s, 230, 230, false));
         assert(q.next(s) && same(s, 231, 230, true));
+    }
+
+    // --- wake-only (dark screen): a tap only wakes the radar; LVGL sees nothing of it ---
+    {
+        TouchQueue q;
+        q.setWakeOnly(true);
+        q.add(TouchQueue::DOWN, 200, 200, 0);
+        assert(q.holding());                            // display.cpp counts this as a touch
+        q.add(TouchQueue::DOWN, 204, 201, 20);
+        q.add(TouchQueue::UP, 0, 0, 40);
+        S s;
+        assert(!q.holding() && q.empty() && !q.next(s));
+        assert(same(q.delivered(), 0, 0, false));       // LVGL still sees no press
+    }
+
+    // --- a long press that starts dark stays held after the screen lights, up to the lift:
+    //     no long press (theme change), no click; the next press reaches LVGL ---
+    {
+        TouchQueue q;
+        q.setWakeOnly(true);
+        q.add(TouchQueue::DOWN, 233, 233, 0);
+        q.setWakeOnly(false);                           // the touch lit the screen
+        for (uint32_t t = 20; t <= 2000; t += 20) {
+            q.add(TouchQueue::DOWN, 233, (int16_t)(233 + t / 200), t);   // held, drifting a little
+            assert(q.holding() && q.empty());
+        }
+        q.add(TouchQueue::UP, 0, 0, 2020);
+        assert(!q.holding() && q.empty());
+        q.add(TouchQueue::DOWN, 100, 120, 2100);
+        S s;
+        assert(q.next(s) && same(s, 100, 120, true));
+    }
+
+    // --- a held press also ends on failed reads that go on (a controller that answers "no
+    //     valid data" after a lift), so wake-only can't swallow every later touch; brief
+    //     failures don't end it ---
+    {
+        TouchQueue q;
+        q.setWakeOnly(true);
+        q.add(TouchQueue::DOWN, 233, 233, 0);
+        q.setWakeOnly(false);
+        q.add(TouchQueue::NODATA, 0, 0, 20);
+        q.add(TouchQueue::NODATA, 0, 0, 60);
+        q.add(TouchQueue::DOWN, 233, 233, 80);          // the finger is still there
+        assert(q.holding() && q.empty());
+        q.add(TouchQueue::NODATA, 0, 0, 100);
+        q.add(TouchQueue::NODATA, 0, 0, 100 + TOUCH_NODATA_RELEASE_MS);
+        assert(!q.holding() && q.empty());
+        q.add(TouchQueue::DOWN, 50, 60, 300);
+        S s;
+        assert(q.next(s) && same(s, 50, 60, true));
+    }
+
+    // --- a press that started on the lit screen keeps going to LVGL when the screen goes
+    //     dark, lift included: LVGL must never be left holding a press ---
+    {
+        TouchQueue q;
+        q.add(TouchQueue::DOWN, 150, 150, 0);
+        q.setWakeOnly(true);
+        q.add(TouchQueue::DOWN, 160, 150, 20);
+        q.add(TouchQueue::UP, 0, 0, 40);
+        assert(!q.holding());
+        S s;
+        assert(q.next(s) && same(s, 150, 150, true));
+        assert(q.next(s) && same(s, 160, 150, true));
+        assert(q.next(s) && same(s, 160, 150, false));
+        q.add(TouchQueue::DOWN, 10, 10, 100);           // the next press, dark: held
+        assert(q.holding() && q.empty());
     }
 }

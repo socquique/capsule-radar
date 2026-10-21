@@ -5,8 +5,9 @@
 // NOTE: gfx->begin() must stay ahead of touch_begin() — on the 1.43 the touch
 // controller's reset is tied to the panel reset and it is absent from I2C until then.
 // The actual UI is built by ui_boot_create() (shared with the native SDL sim).
-#include "display.h"
 #include "config.h"
+#if !defined(BOARD_LCD21)      // CO5300 AMOLED driver (1.75 + 1.43); the LCD-2.1 build uses display_st7701.cpp
+#include "display.h"
 #include "radar_view.h"
 #include "ui.h"
 #include "touch.h"
@@ -632,6 +633,9 @@ static void touch_sample(bool force) {
                 s_touchQ.add(TouchQueue::DOWN, (int16_t)lx, (int16_t)ly, now);
             else
                 s_touchQ.add(TouchQueue::UP, 0, 0, now);   // black corners are outside the logical UI
+            // A press held back from LVGL (wake-only) is still a touch: it restarts LVGL's
+            // inactivity time, which wakes the screen and keeps it lit while the finger rests.
+            if (s_touchQ.holding()) lv_disp_trig_activity(NULL);
             break;
     }
 }
@@ -745,7 +749,10 @@ void sweepConfig(uint16_t ring565, uint16_t lead565, uint16_t ink565, bool sweep
 void sweepTick() { compose_step(); }
 bool sweepAvailable() { return sweep_ready(); }
 
-void setBrightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v); }
+void setBrightness(uint8_t v) {
+    if (s_gfx) s_gfx->setBrightness(v);
+    s_touchQ.setWakeOnly(v == 0);   // a dark panel takes a touch only as a wake-up
+}
 
 void setRotation(uint16_t degrees) {
     uint16_t normalized = (uint16_t)(degrees % 360);
@@ -782,3 +789,5 @@ uint16_t rotation() { return s_rot; }
 uint32_t inactiveMs() { return lv_disp_get_inactive_time(NULL); }
 
 } // namespace display
+
+#endif  // !BOARD_LCD21

@@ -8,6 +8,7 @@
 // Virtual clock: the mock advances it, so a multi-second stall costs no real time.
 extern unsigned long g_virtualMs;
 inline unsigned long millis() { return g_virtualMs; }
+inline void delay(unsigned long ms) { g_virtualMs += ms; }
 
 class Print {
 public:

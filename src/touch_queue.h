@@ -26,20 +26,32 @@ public:
         if (kind == NODATA) {
             // A failed read is not a lift. Only reads that keep failing (the controller
             // stopped answering) end the press, so a press can never stick for good.
-            if (!_lastPressed) return;
+            if (!_fingerDown) return;
             if (!_failing) { _failing = true; _failSinceMs = nowMs; return; }
             if (nowMs - _failSinceMs < TOUCH_NODATA_RELEASE_MS) return;
             kind = UP;
         }
         _failing = false;
         if (kind == UP) {
+            _fingerDown = false;
+            if (_held) { _held = false; return; }       // LVGL never saw this press
             if (!_lastPressed) return;                  // already lifted: nothing new
             push(Sample{_lastX, _lastY, false});        // the lift happens where the finger was
             return;
         }
+        if (!_fingerDown) { _fingerDown = true; _held = _wakeOnly; }   // decided at the press start
+        if (_held) return;
         if (_lastPressed && x == _lastX && y == _lastY) return;   // the finger did not move
         push(Sample{x, y, true});
     }
+
+    // Wake-only (the screen is dark): a press that starts now only wakes the radar. It is
+    // held back from LVGL until the finger lifts, even if the screen lights meanwhile, so a
+    // tap meant to wake the radar can't select a plane and a hold can't change the theme.
+    void setWakeOnly(bool on) { _wakeOnly = on; }
+
+    // A press held back by wake-only is down.
+    bool holding() const { return _held; }
 
     // The oldest waiting sample. False when none is waiting.
     bool next(Sample &out) {
@@ -79,6 +91,9 @@ private:
     Sample   _delivered = {0, 0, false};
     bool     _lastPressed = false;              // the last state queued
     int16_t  _lastX = 0, _lastY = 0;
+    bool     _fingerDown = false;               // the finger is on the panel (queued or held)
+    bool     _wakeOnly = false;
+    bool     _held = false;                     // this press is held back from LVGL
     bool     _failing = false;                  // reads are failing while pressed...
     uint32_t _failSinceMs = 0;                  // ...since this time
 };

@@ -115,6 +115,9 @@ adsb.fi replies `Transfer-Encoding: chunked` (adsb.lol sends `Content-Length`), 
 this ArduinoJson reads the hex chunk-size line first, parses `4000` as a valid JSON number,
 and returns success with no `ac` key: a 200 that silently yields no aircraft. HTTP/1.0 has no
 chunked encoding, so the body is Content-Length- or close-delimited and streams correctly.
+The exception is adsb.lol, which now refuses HTTP/1.0 with `426 Upgrade Required` (its
+`istio-envoy` front end has Envoy's `accept_http_10` off, the default). It sends
+`Content-Length`, so it is asked in HTTP/1.1 (`http10` is per provider in `kProviders`).
 
 ### Not used: OpenSky
 Now requires OAuth2 client-credentials and has tighter anonymous limits — awkward for an always-on embedded device. Keep as a documented alternative only.

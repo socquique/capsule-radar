@@ -17,10 +17,21 @@
 #define ADSB_QUERY_MULT     1.4f
 #define ADSB_QUERY_MIN_KM   12.0f
 #define ADSB_QUERY_MAX_KM   150.0f
+// Display-range presets. The zoom button on the scope cycles RANGE_STEPS_KM (up to 100 km);
+// the web page's <select> offers WEB_RANGE_KM, which goes on to RANGE_KM_MAX (150 km). Nothing
+// goes past 150: the feed query clamps to ADSB_QUERY_MAX_KM, so a wider range (the old
+// web-only 250 km) promised rings the feed never fills. A stored range outside
+// [RANGE_KM_MIN, RANGE_KM_MAX] is clamped at boot and on save; <= 0, NaN or inf becomes
+// RANGE_KM_DEFAULT (0 divides by zero in geo::projectToScreen).
 static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 // TCAS theme cycles round nautical-mile ranges instead (proposal by @pikachu.jp); the
 // quarter-rings then label as round numbers too. 80 nm ≈ 148 km = the query clamp.
 static const float RANGE_STEPS_TCAS_NM[] = {5.0f, 10.0f, 20.0f, 40.0f, 80.0f};
+static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f, 150.0f};
+// The floor is TCAS's 5 nm step (9.26 km), not 10 km: the zoom button saves it as is, and a
+// 10 km floor would move it off the TCAS ladder at the next boot.
+#define RANGE_KM_MIN        9.26f
+#define RANGE_KM_MAX        150.0f
 #define POLL_INTERVAL_MS    2000           // be gentle with the free API (>=1000)
 #define POLL_INTERVAL_BATTERY_MS 5000      // slower polling when running on battery
 #define MOTION_INTERP       1              // 1 = glyphs glide between polls; 0 = snap to new pos
@@ -31,12 +42,14 @@ static const float RANGE_STEPS_TCAS_NM[] = {5.0f, 10.0f, 20.0f, 40.0f, 80.0f};
 #define WX_RADAR_REFRESH_MS 300000UL       // RainViewer frames update about every 5 minutes
 #define CLOUD_IMAGE_REFRESH_MS 600000UL    // EUMETSAT MTG cloud imagery; cache for 10 minutes
 
-// ---------- Screen (CO5300 AMOLED, 466x466 on every supported board) ----------
+// ---------- Screen geometry (AMOLED defaults; LCD 2.1 overrides below) ----------
+#if !defined(BOARD_LCD21)
 #define SCREEN_W            466
 #define SCREEN_H            466
 #define SCREEN_CX           233
 #define SCREEN_CY           233
 #define RADAR_R_OUTER_PX    218            // outer ring radius in pixels
+#endif
 // radar sweep (radar_view.cpp draws it in LVGL; display.cpp's compositor draws it per pixel)
 #define SWEEP_PERIOD_MS     8000           // one revolution (LVGL sweep)
 #define SWEEP_COMP_PERIOD_MS 40000         // one revolution when the compositor draws it (a slower sweep hides the
@@ -55,6 +68,12 @@ static const float RANGE_STEPS_TCAS_NM[] = {5.0f, 10.0f, 20.0f, 40.0f, 80.0f};
 #define LV_COLOR_DEPTH_BITS 16
 // LCD_COL_OFFSET / LCD_ROW_OFFSET / LCD_QSPI_HZ are panel-specific -> board header.
 #define BRIGHTNESS_DEFAULT  200            // 0..255, panel brightness via cmd 0x51
+// Face-down sleep (QMI8658, logic in facedown_sleep.h): the IMU is read every
+// FACEDOWN_CHECK_MS, and FACEDOWN_COUNT face-down readings in a row with no touch in between
+// turn the screen off (~1.6 s). Accelerometer Z at ±2 g full scale: 16384 LSB/g.
+#define FACEDOWN_CHECK_MS   400
+#define FACEDOWN_COUNT      4
+#define FACEDOWN_THRESHOLD  9000           // ~0.55 g past zero, on the side opposite the resting pose
 #define TZ_STR              "CET-1CEST,M3.5.0,M10.5.0/3"  // POSIX TZ (Spain) for local time/date
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch
@@ -125,11 +144,14 @@ static const float RANGE_STEPS_TCAS_NM[] = {5.0f, 10.0f, 20.0f, 40.0f, 80.0f};
 // The pin map, panel gaps, touch driver and which peripherals exist all live in a
 // per-board header. Select one with a build flag in platformio.ini; the 1.75 is the
 // default so an unflagged build behaves exactly as before.
+//   -DBOARD_LCD21       -> Waveshare ESP32-S3-Touch-LCD-2.1
 //   -DBOARD_AMOLED_143  -> Waveshare ESP32-S3-Touch-AMOLED-1.43
 //   (none)              -> Waveshare ESP32-S3-Touch-AMOLED-1.75  (reference board)
 // Never guess pins for a new board: take them from the vendor demo or the Arduino
 // core board variant, then confirm them on hardware before committing.
-#if defined(BOARD_AMOLED_143)
+#if defined(BOARD_LCD21)
+#  include "boards/board_lcd_21.h"
+#elif defined(BOARD_AMOLED_143)
 #  include "boards/board_amoled_143.h"
 #else
 #  include "boards/board_amoled_175.h"
@@ -138,4 +160,8 @@ static const float RANGE_STEPS_TCAS_NM[] = {5.0f, 10.0f, 20.0f, 40.0f, 80.0f};
 // Safety net: catches a board header that still has placeholder pins in it.
 #if (PIN_LCD_SCLK < 0) || (PIN_I2C_SDA < 0)
 #  error "board header: QSPI/I2C pins are placeholders (-1). Fill in the real values."
+#endif
+
+#ifndef ADSB_TASK_STACK_BYTES
+#define ADSB_TASK_STACK_BYTES 16384
 #endif

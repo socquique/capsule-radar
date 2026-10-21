@@ -1,0 +1,65 @@
+name: Build and test firmware
+
+on:
+  pull_request:
+  push:
+    branches: ['port/esp32-s3-lcd-21']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [esp32-s3-amoled-175, esp32-s3-amoled-143, esp32-s3-lcd-21]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: pip install platformio esptool
+      - name: Build firmware
+        run: pio run -e ${{ matrix.env }}
+      - name: Host tests
+        if: matrix.env == 'esp32-s3-amoled-175'
+        run: ./tests/run_host_tests.sh
+      - name: Verify LCD interrupt configuration
+        if: matrix.env == 'esp32-s3-lcd-21'
+        run: |
+          SDK=.pio/build/esp32-s3-lcd-21/config/sdkconfig.h
+          for flag in LCD_RGB_ISR_IRAM_SAFE GDMA_ISR_IRAM_SAFE GDMA_CTRL_FUNC_IN_IRAM; do
+            grep -qx "#define CONFIG_${flag} 1" "$SDK"
+          done
+      - name: Package USB and OTA images
+        env:
+          PIO_ENV: ${{ matrix.env }}
+        run: |
+          set -euo pipefail
+          b=".pio/build/$PIO_ENV"
+          case "$PIO_ENV" in
+            esp32-s3-amoled-175) sfx="" ;;
+            esp32-s3-amoled-143) sfx="-amoled143" ;;
+            esp32-s3-lcd-21) sfx="-lcd21" ;;
+          esac
+          bootloader="$b/bootloader.bin"
+          if [ ! -f "$bootloader" ]; then
+            bootloader="$(find "$b" -name bootloader.bin | head -1)"
+          fi
+          boot_app0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' | head -1)"
+          test -f "$bootloader"
+          test -f "$boot_app0"
+          mkdir -p firmware
+          python -m esptool --chip esp32s3 merge_bin -o "firmware/CapsuleRadar-esp32s3$sfx.bin" \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0 "$bootloader" 0x8000 "$b/partitions.bin" \
+            0xe000 "$boot_app0" 0x10000 "$b/firmware.bin"
+          cp "$b/firmware.bin" "firmware/CapsuleRadar-ota$sfx.bin"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}
+          path: firmware/*.bin

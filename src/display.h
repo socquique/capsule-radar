@@ -13,7 +13,9 @@ bool begin();
 // Pump LVGL: render dirty areas + run LVGL timers. Call every loop() iteration.
 void loop();
 
-// 0..255 panel brightness (CO5300 command 0x51).
+// 0..255 panel brightness (CO5300 command 0x51). 0 = dark (face-down sleep): a touch then
+// only wakes the screen, and a press that starts while it is dark never reaches LVGL, up to
+// its lift (TouchQueue::setWakeOnly).
 void setBrightness(uint8_t v);
 
 // ms since the last touch (LVGL inactivity timer) — for idle auto-dim.

@@ -34,6 +34,7 @@ fi
 
 run touch_queue -Isrc tests/touch_queue_test.cpp
 run snapshot_gate -Isrc tests/snapshot_gate_test.cpp
+run web_input -Isrc tests/web_input_test.cpp
 run adsb_pacing -Isrc tests/adsb_pacing_test.cpp
 run feed_watchdog -Isrc tests/feed_watchdog_test.cpp
 
@@ -47,6 +48,8 @@ else
     echo; echo "=== adsb_json_stream: SKIPPED (no $AJ) ==="
     echo "  run 'pio run -e esp32-s3-amoled-175' once to populate the library cache"
 fi
+
+run facedown_sleep -Isrc tests/facedown_sleep_test.cpp
 
 printf '\n%s\n' "$([ $rc -eq 0 ] && echo 'ALL HOST TESTS PASSED' || echo 'HOST TESTS FAILED')"
 exit $rc

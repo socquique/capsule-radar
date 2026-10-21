@@ -35,6 +35,11 @@ public:
     int read() override {
         const int value = _source.read();
         if (value >= 0) ++_bytesRead;
+        // timedRead() calls this in a loop with no yield until a byte arrives. If the server
+        // pauses mid-body for more than 5 s, that busy loop starves IDLE0 and the task
+        // watchdog restarts the radar. A 1 ms wait lets the idle task run; the stream
+        // timeout still ends a stalled read.
+        else delay(1);
         return value;
     }
     int peek() override { return _source.peek(); }
@@ -58,11 +63,12 @@ void AdsbClient::begin(double homeLat, double homeLon, float rangeKm) {
 struct AdsbProvider {
     const char* host;
     const char* pathFmt;   // lat, lon, radius-in-nm
+    bool        http10;    // ask in HTTP/1.0 (see fetchFrom for why, and why not adsb.lol)
 };
 static const AdsbProvider kProviders[ADSB_PROVIDER_COUNT] = {
-    { ADSB_PRIMARY_HOST,  "/v2/point/%.4f/%.4f/%.0f"        },
-    { ADSB_OPENDATA_HOST, "/api/v3/lat/%.4f/lon/%.4f/dist/%.0f" },
-    { ADSB_FALLBACK_HOST, "/v2/point/%.4f/%.4f/%.0f"        },
+    { ADSB_PRIMARY_HOST,  "/v2/point/%.4f/%.4f/%.0f",            true  },
+    { ADSB_OPENDATA_HOST, "/api/v3/lat/%.4f/lon/%.4f/dist/%.0f", true  },
+    { ADSB_FALLBACK_HOST, "/v2/point/%.4f/%.4f/%.0f",            false },
 };
 
 bool AdsbClient::poll(std::vector<Aircraft>& out) {
@@ -114,8 +120,14 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
     // therefore saw the hex chunk-size line first, parsed "4000" as a perfectly good JSON
     // number, and reported success with no "ac" key -- a 200 that silently yielded no
     // aircraft. HTTP/1.0 makes the body either Content-Length- or close-delimited, both of
-    // which the streaming parser handles. Verified against all three providers.
-    http.useHTTP10(true);
+    // which the streaming parser handles.
+    //
+    // Except adsb.lol: it now sits behind an Envoy proxy, which refuses HTTP/1.0 outright
+    // (426 "Upgrade Required" on every request; Envoy's accept_http_10 is off by default),
+    // so that fallback was never answering. It replies with Content-Length rather than
+    // chunked, so HTTP/1.1 streams fine there. Should it ever start chunking, the 200 parses
+    // with no "ac" key and takes the same backoff as any unusable reply.
+    http.useHTTP10(kProviders[slot].http10);
     http.setConnectTimeout(6000);    // fail reasonably fast: a slow host must not block the
     http.setTimeout(8000);           // task (and the user's route/photo lookups) for too long
     if (!http.begin(client, url)) { Serial.printf("[adsb] begin failed (%s)\n", host); return false; }
