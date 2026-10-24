@@ -27,7 +27,7 @@ static void drive(AdsbPacer &p, Gaps &g, unsigned silentMask, uint32_t start, ui
             g.last[s] = now;
             p.onAttempt(s, now);
             if (silentMask & (1u << s)) p.onTransportFail(s);
-            else                        p.onOk(s);
+            else                        p.onOk(s, now);
         }
     }
 }
@@ -61,7 +61,7 @@ int main() {
         assert(!p.cooling(0, (uint32_t)(t + ADSB_COOLDOWN_403_MAX_MS)));
 
         // A success resets the ladder to the 15 min base and makes the next park news again.
-        p.onOk(0);
+        p.onOk(0, 999000);
         assert(p.onRefused(0, 999999));
         assert(p.cooling(0, (uint32_t)(999999 + ADSB_COOLDOWN_403_MS - 1)));
         assert(!p.cooling(0, (uint32_t)(999999 + ADSB_COOLDOWN_403_MS)));
@@ -98,39 +98,87 @@ int main() {
         assert(!p.cooling(0, 1000 + 120000));
     }
 
-    // --- easing needs a run of successes, and is additive, not a reset ---
+    // --- easing needs a run of successes AND a quiet spell, and is additive, not a reset ---
     {
+        const uint32_t Q = ADSB_SPACING_EASE_QUIET_MS;
         AdsbPacer p;
-        p.onRateLimited(0, 1000, 0);
-        p.onRateLimited(0, 2000, 0);                        // spacing = 2 * STEP
-        for (int i = 1; i < ADSB_SPACING_EASE_OKS; ++i) assert(!p.onOk(0));
-        assert(p.onOk(0));                                  // Nth success eases one step
+        p.onUnusable(0, 1000);
+        p.onUnusable(0, 2000);                              // spacing = 2 * STEP (no 429 to remember)
+        for (int i = 0; i < ADSB_SPACING_EASE_OKS * 3; ++i)
+            assert(!p.onOk(0, 3000 + i * 1000));            // plenty of successes, but not quiet yet
+        assert(!p.onOk(0, 2000 + Q - 1));
+        assert(p.onOk(0, 2000 + Q));                        // quiet spell over: ease one step
         assert(p.spacingMs(0) == ADSB_SPACING_STEP_MS);
-        for (int i = 1; i < ADSB_SPACING_EASE_OKS; ++i) assert(!p.onOk(0));
-        assert(p.onOk(0));
+        for (int i = 1; i < ADSB_SPACING_EASE_OKS; ++i) assert(!p.onOk(0, 2000 + 2 * Q));
+        assert(!p.onOk(0, 2000 + 2 * Q - 1));               // the next step needs its own quiet spell
+        assert(p.onOk(0, 2000 + 2 * Q));
         assert(p.spacingMs(0) == 0);                        // back to full speed
-        assert(!p.onOk(0));                                 // nothing left to ease
+        assert(!p.onOk(0, 2000 + 3 * Q));                   // nothing left to ease
     }
 
-    // --- a 429 mid-run restarts the streak: no easing off a stale count ---
+    // --- a 429 mid-run restarts the streak and the quiet spell ---
     {
+        const uint32_t Q = ADSB_SPACING_EASE_QUIET_MS;
         AdsbPacer p;
         p.onRateLimited(0, 1000, 0);
-        for (int i = 1; i < ADSB_SPACING_EASE_OKS; ++i) p.onOk(0);
-        p.onRateLimited(0, 2000, 0);                        // throttled again
-        assert(!p.onOk(0));                                 // streak reset, not one-from-easing
+        for (int i = 1; i < ADSB_SPACING_EASE_OKS; ++i) p.onOk(0, 2000);
+        p.onRateLimited(0, 1000 + Q - 1000, 0);             // throttled again just before easing
+        assert(!p.onOk(0, 1000 + Q + 1000));                // streak reset, not one-from-easing
+        for (int i = 1; i < ADSB_SPACING_EASE_OKS; ++i) p.onOk(0, 1000 + Q + 1000);
+        assert(!p.onOk(0, 1000 + Q + 1000));                // and the quiet spell restarted too
         assert(p.spacingMs(0) == ADSB_SPACING_STEP_MS * 2);
+        assert(!p.onOk(0, Q + 2 * Q));                      // quiet, but STEP drew that 429: held
+        assert(p.onOk(0, Q + ADSB_SPACING_PROBE_MS));       // an hour on, it is re-tested
+        assert(p.spacingMs(0) == ADSB_SPACING_STEP_MS);
+    }
+
+    // --- a fixed limit: hold the spacing that works, re-test the faster one hourly ---
+    {
+        const uint32_t Q = ADSB_SPACING_EASE_QUIET_MS, H = ADSB_SPACING_PROBE_MS;
+        AdsbPacer p;
+        p.onRateLimited(0, 1000, 60);                       // full speed tripped it
+        for (int i = 0; i < ADSB_SPACING_EASE_OKS; ++i) p.onOk(0, 70000);
+        for (uint32_t t = 1000 + Q; t < 1000 + H; t += Q)
+            assert(!p.onOk(0, t));                          // quiet spells pass, STEP holds
+        assert(p.spacingMs(0) == ADSB_SPACING_STEP_MS);
+        assert(p.onOk(0, 1000 + H));                        // hourly re-test of full speed
+        assert(p.spacingMs(0) == 0);
+        p.onRateLimited(0, 1000 + H + 5000, 60);            // still too fast: back to STEP...
+        for (int i = 0; i < ADSB_SPACING_EASE_OKS; ++i) p.onOk(0, 1000 + H + 70000);
+        assert(!p.onOk(0, 1000 + H + 5000 + Q));            // ...and held for another hour
+        assert(p.onOk(0, 1000 + H + 5000 + H));
+
+        AdsbPacer q;                                        // STEP tripped too: hold 2 * STEP
+        q.onRateLimited(1, 1000, 0);
+        q.onRateLimited(1, 2000, 0);
+        for (int i = 0; i < ADSB_SPACING_EASE_OKS; ++i) q.onOk(1, 3000);
+        assert(!q.onOk(1, 2000 + Q));
+        assert(q.spacingMs(1) == ADSB_SPACING_STEP_MS * 2);
+    }
+
+    // --- millis() rollover does not stall or rush the quiet spell ---
+    {
+        const uint32_t Q = ADSB_SPACING_EASE_QUIET_MS;
+        const uint32_t t0 = 0xFFFFFFFFu - 1000;
+        AdsbPacer p;
+        p.onRateLimited(0, t0, 0);
+        for (int i = 1; i < ADSB_SPACING_EASE_OKS; ++i) p.onOk(0, t0 + 2000);
+        assert(!p.onOk(0, t0 + Q - 1));
+        assert(!p.onOk(0, t0 + Q));                         // quiet, but full speed drew the 429
+        assert(!p.onOk(0, (uint32_t)(t0 + ADSB_SPACING_PROBE_MS - 1)));
+        assert(p.onOk(0, (uint32_t)(t0 + ADSB_SPACING_PROBE_MS)));   // wraps past zero, still exactly an hour
     }
 
     // --- a 200 we cannot parse paces like a 429 instead of looping every poll ---
     {
         AdsbPacer p;
         p.onAttempt(2, 1000);
-        assert(p.onUnusable(2) == ADSB_SPACING_STEP_MS);
+        assert(p.onUnusable(2, 1000) == ADSB_SPACING_STEP_MS);
         assert(p.cooling(2, 1000 + ADSB_SPACING_STEP_MS - 1));
-        assert(p.onUnusable(2) == ADSB_SPACING_STEP_MS * 2);
+        assert(p.onUnusable(2, 2000) == ADSB_SPACING_STEP_MS * 2);
         p.onAttempt(2, 9000);                               // and it recovers on its own
-        for (int i = 0; i < ADSB_SPACING_EASE_OKS * 2; ++i) p.onOk(2);
+        for (int i = 0; i < ADSB_SPACING_EASE_OKS * 2; ++i)
+            p.onOk(2, 2000 + (uint32_t)(i / ADSB_SPACING_EASE_OKS + 1) * ADSB_SPACING_EASE_QUIET_MS);
         assert(p.spacingMs(2) == 0);
     }
 
@@ -218,7 +266,7 @@ int main() {
         assert(p.spacingMs(0) == 0);                        // the 429 spacing is untouched
         // The first answer ends the silence at once: no lingering gap. (Sharing the 429
         // ladder kept the feed slow for ~20 minutes after a short internet outage.)
-        p.onOk(0);
+        p.onOk(0, 2000 + ADSB_SPACING_STEP_MS);
         assert(!p.cooling(0, (uint32_t)(2000 + ADSB_SPACING_STEP_MS + 1)));
         // The streak is reset too: the next lone failure is free again.
         assert(p.onTransportFail(0) == 0);
@@ -233,7 +281,7 @@ int main() {
         p.onAttempt(0, 1000);
         p.onTransportFail(0);
         assert(p.onTransportFail(0) == ADSB_SPACING_STEP_MS);
-        p.onOk(0);                                          // silence gone, 429 spacing stays
+        p.onOk(0, 1000);                                    // silence gone, 429 spacing stays
         assert(p.spacingMs(0) == ADSB_SPACING_STEP_MS);
         assert(p.cooling(0, (uint32_t)(1000 + ADSB_SPACING_STEP_MS - 1)));
     }
@@ -297,7 +345,7 @@ int main() {
         assert(p.gapMs(1, last1) == ADSB_SILENCE_OUTAGE_MAX_MS);
         // ...then slot 0 answers, and slots 1 and 2 wait their full gap again.
         p.onAttempt(0, (uint32_t)(4 * 60000 + 1000));
-        p.onOk(0);
+        p.onOk(0, (uint32_t)(4 * 60000 + 1000));
         assert(p.gapMs(1, last1) == ADSB_SPACING_MAX_MS);
         assert(p.cooling(1, (uint32_t)(last1 + ADSB_SPACING_MAX_MS - 1)));
         assert(!p.cooling(1, (uint32_t)(last1 + ADSB_SPACING_MAX_MS)));

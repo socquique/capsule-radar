@@ -111,6 +111,12 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define ADSB_SPACING_STEP_MS    4000UL      // first extra gap imposed after a 429
 #define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
 #define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down
+#define ADSB_SPACING_EASE_QUIET_MS 600000UL // ...and this long without a 429 since the last back-off or ease
+                                            // (one step down per quiet spell, so a fixed limit is not re-tripped
+                                            // every minute: airplanes.live was 429ing every ~100 s at 2 s polls)
+#define ADSB_SPACING_PROBE_MS 3600000UL  // never ease back to a spacing that drew a 429 until this long after it
+                                        // (stops one-radar airplanes.live tripping every quiet spell; it holds
+                                        // 4 s fine but 2 s trips within seconds)
 // While EVERY provider we may ask is silent (parked, or failing at the transport level),
 // the silence gap (ADSB_SPACING_STEP_MS doubling up to ADSB_SPACING_MAX_MS) is capped at
 // this. A network-wide outage then costs at most this long after the link returns, not a
