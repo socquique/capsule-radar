@@ -640,6 +640,7 @@ static void set_draw_buf_size() {
 }
 
 // --- LVGL flush ----------------------------------------------------------------------
+static void touch_sample(bool force);
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
     if (!s_panel || !s_fb[0]) {                 // headless (panel bring-up failed)
         if (lv_disp_flush_is_last(drv)) s_frameCount++;
@@ -650,6 +651,8 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
     // Safe mid-frame: strips already flushed are in s_phys and on the panel; the rest of
     // s_phys still matches what the panel shows, so the composite is never wrong.
     compose_step();
+    // Sample the touch panel too: LVGL reads it only between frames (see touch_queue.h).
+    touch_sample(false);
     if (!drv->full_refresh) {
         flush_area(area, px);
         if (lv_disp_flush_is_last(drv)) s_frameCount++;
@@ -713,9 +716,20 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
     lv_disp_flush_ready(drv);
 }
 
-// CST820 touch -> LVGL pointer, undoing the display rotation (mirror of display.cpp).
-static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
-    (void)drv;
+// CST820 touch -> TouchQueue -> LVGL pointer, undoing the display rotation (mirror of
+// display.cpp). With the sweep compositor busy, LVGL renders only a few frames a second
+// and reads touch only between them, so a quick tap could fall between two reads.
+static bool     s_touchOk = false;              // touch_begin() succeeded
+static uint32_t s_touchLastMs = 0;              // when the panel was last sampled
+static bool     s_touchReplaying = false;       // LVGL is calling back for the queued samples
+
+// Read the panel into the queue: always from the read callback (force), and at most every
+// TOUCH_SAMPLE_MS between flush strips. Both run on the LVGL task.
+static void touch_sample(bool force) {
+    if (!s_touchOk) return;
+    const uint32_t now = millis();
+    if (!force && now - s_touchLastMs < TOUCH_SAMPLE_MS) return;
+    s_touchLastMs = now;
     uint16_t x = 0, y = 0;
     const TouchRead state = touch_read(&x, &y);
     const float c = (SCREEN_W - 1) * 0.5f;
@@ -724,16 +738,24 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     const int16_t ly = (int16_t)constrain(lroundf(c - s_rotSin * dx + s_rotCos * dy), 0L, (long)SCREEN_H - 1);
     s_touchQueue.add(state == TOUCH_DOWN ? TouchQueue::DOWN :
                      state == TOUCH_UP ? TouchQueue::UP : TouchQueue::NODATA,
-                     lx, ly, millis());
+                     lx, ly, now);
     // A press held back from LVGL (wake-only) is still a touch: it restarts LVGL's
     // inactivity time, which wakes the screen and keeps it lit while the finger rests.
     if (state == TOUCH_DOWN && s_touchQueue.holding()) lv_disp_trig_activity(NULL);
+}
+
+static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
+    (void)drv;
+    // Take the current state once per LVGL read, not again for each queued sample LVGL
+    // asks for: a finger that keeps moving would otherwise keep the queue from emptying.
+    if (!s_touchReplaying) touch_sample(true);
     TouchQueue::Sample sample;
     if (!s_touchQueue.next(sample)) sample = s_touchQueue.delivered();
     data->point.x = sample.x;
     data->point.y = sample.y;
     data->state = sample.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     data->continue_reading = !s_touchQueue.empty();
+    s_touchReplaying = data->continue_reading;
 }
 
 namespace display {
@@ -806,6 +828,7 @@ bool begin() {
     lv_disp_drv_register(&s_disp_drv);
 
     if (touch_begin()) {
+        s_touchOk = true;
         lv_indev_drv_init(&s_indev_drv);
         s_indev_drv.type = LV_INDEV_TYPE_POINTER;
         s_indev_drv.read_cb = touch_read_cb;
