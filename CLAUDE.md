@@ -105,8 +105,8 @@ built for — check it first when a screen stays black.
 ## Status
 The firmware is feature-complete for its current scope (see README for the feature
 list): live feed with failover, four themes, detail card with route + photo lookups,
-weather modes (forecast / precipitation radar / satellite clouds), web configuration,
-OTA, battery/GPS variants and the desktop simulator. Ideas still on the shelf are marked
+weather modes (forecast / precipitation radar / satellite clouds), the idle analog clock,
+web configuration, OTA, battery/GPS variants and the desktop simulator. Ideas still on the shelf are marked
 "not built yet" in `docs/FEATURES.md`.
 
 ## Conventions & guardrails

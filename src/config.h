@@ -77,6 +77,34 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define TZ_STR              "CET-1CEST,M3.5.0,M10.5.0/3"  // POSIX TZ (Spain) for local time/date
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch
+// Idle clock: instead of dimming, the radar animates into an analog clock (clock_face.h has
+// the animation, radar_view.cpp the dial and the dimmed scene, display.cpp's compositor the
+// moving hands). Angles 0 = 12 o'clock; lengths are fractions of RADAR_R_OUTER_PX.
+#define CLOCK_ENTER_MS        2000      // radar -> clock animation
+#define CLOCK_EXIT_MS         1200      // clock -> radar animation
+#define CLOCK_LOCK_FRAC       0.75f     // the spinning sweep line is on the second from here on
+#define CLOCK_MIN_SPIN_DEG    120.0f    // ...after spinning forward at least this far
+#define CLOCK_RADAR_OPA       150       // planes, trails, rings, map behind the clock (255 = as usual)
+#define CLOCK_RADAR_OPA_STEP1 200       // ...during the first step of the animation
+#define CLOCK_TRAIL_OPA       150       // sweep trail behind the second hand (255 = the radar's)
+#define CLOCK_BRIGHTNESS_PCT  70        // panel brightness on the clock, % of the day brightness
+#define CLOCK_HOUR_LEN        0.50f     // hands
+#define CLOCK_MIN_LEN         0.76f
+#define CLOCK_SEC_LEN         0.94f
+#define CLOCK_SEC_TAIL        0.14f     // second hand: tail past the centre
+#define CLOCK_HOUR_W          8         // hand widths, px
+#define CLOCK_MIN_W           5
+#define CLOCK_OUTLINE_W       4         // dark outline around the hour/minute hands (extra width, px)
+#define CLOCK_OUTLINE_OPA     200
+#define CLOCK_CAP_R           7         // centre cap radius, px
+#define CLOCK_CAP_DOT_R       3         // lead-coloured dot on the cap, px
+#define CLOCK_NUM_R           0.84f     // dial: centre of the 12/3/6/9 numbers
+#define CLOCK_HTICK_R0        0.90f     // hour marks run from here to CLOCK_TICK_R1
+#define CLOCK_MTICK_R0        0.965f    // minute marks run from here to CLOCK_TICK_R1
+#define CLOCK_TICK_R1         0.995f
+#define CLOCK_NUM_OPA         190       // the dial never moves, so it stays dim (AMOLED burn-in)
+#define CLOCK_HTICK_OPA       170
+#define CLOCK_MTICK_OPA       80
 
 // ---------- Touch ----------
 // LVGL reads the touch panel only between frames, and a swipe redraws the whole screen on
@@ -116,6 +144,12 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define ADSB_SPACING_STEP_MS    4000UL      // first extra gap imposed after a 429
 #define ADSB_SPACING_MAX_MS    60000UL      // never space a provider out further than this
 #define ADSB_SPACING_EASE_OKS       3       // successes needed before easing the gap back down
+#define ADSB_SPACING_EASE_QUIET_MS 600000UL // ...and this long without a 429 since the last back-off or ease
+                                            // (one step down per quiet spell, so a fixed limit is not re-tripped
+                                            // every minute: airplanes.live was 429ing every ~100 s at 2 s polls)
+#define ADSB_SPACING_PROBE_MS 3600000UL  // never ease back to a spacing that drew a 429 until this long after it
+                                        // (stops one-radar airplanes.live tripping every quiet spell; it holds
+                                        // 4 s fine but 2 s trips within seconds)
 // While EVERY provider we may ask is silent (parked, or failing at the transport level),
 // the silence gap (ADSB_SPACING_STEP_MS doubling up to ADSB_SPACING_MAX_MS) is capped at
 // this. A network-wide outage then costs at most this long after the link returns, not a

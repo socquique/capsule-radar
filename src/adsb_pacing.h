@@ -13,9 +13,12 @@
 //   429 -> we are simply too fast. adsb.lol documents its limits as "dynamic based on
 //          the environment load", so there is no fixed rate to hard-code. Instead keep
 //          an adaptive minimum SPACING per provider: double it on every 429, and ease
-//          it back down after a run of successes. That settles on the fastest rate the
-//          provider will currently tolerate, instead of flapping between full speed and
-//          a dead stop. An explicit Retry-After still wins and parks us for that long.
+//          it back down one step only after a run of successes AND a quiet spell with no
+//          429 (ADSB_SPACING_EASE_QUIET_MS), and never back down to the spacing that
+//          drew the last 429 until ADSB_SPACING_PROBE_MS after it. That settles on the
+//          fastest rate the provider will currently tolerate, instead of flapping between
+//          full speed and a dead stop, and only re-tests the faster rate once an hour.
+//          An explicit Retry-After still wins and parks us for that long.
 //
 //   no answer at all (connect refused, TLS failure, read timeout) -> often a blip that
 //          clears itself, so the first failure is free. But a provider that stays silent
@@ -109,13 +112,16 @@ public:
                                     : (uint32_t)retryAfterS * 1000u;
             _cooldownUntil[slot] = nowMs + park;
         }
-        return backOff(slot);
+        _trippedSpacingMs[slot] = _spacingMs[slot];   // this spacing is too fast, for now
+        _trippedAtMs[slot] = nowMs;
+        _tripped[slot] = true;
+        return backOff(slot, nowMs);
     }
 
     // A 200 whose body we cannot use (no aircraft array). Not a refusal and not a rate
     // limit, but persistent — a provider that changes its payload shape would otherwise be
     // re-asked every poll forever. Same multiplicative backoff, same automatic recovery.
-    uint32_t onUnusable(int slot) { return backOff(slot); }
+    uint32_t onUnusable(int slot, uint32_t nowMs) { return backOff(slot, nowMs); }
 
     // Connect, TLS or read failure (HTTPClient code <= 0): the provider never answered.
     // Returns 0 (no gap to log) on the first consecutive failure, then doubles a silence
@@ -134,18 +140,30 @@ public:
     }
 
     // A usable response. Returns true when the spacing was eased (for logging).
-    bool onOk(int slot) {
+    bool onOk(int slot, uint32_t nowMs) {
         _cooldownLogged[slot] = false;      // healthy again: allow a future park to be announced
         _park403Ms[slot] = 0;               // and restart the 403 escalation ladder at 15 min
         _transportFails[slot] = 0;          // the silence streak is over too,
         _silenceMs[slot] = 0;               // and so is its gap (see onTransportFail)
         // Ease the imposed gap back down after a sustained good run, so a one-off busy period
         // upstream does not slow us permanently. Additive decrease against the multiplicative
-        // increase above: quick to back off, cautious to speed up.
-        if (!_spacingMs[slot] || ++_okStreak[slot] < ADSB_SPACING_EASE_OKS) return false;
+        // increase above: quick to back off, cautious to speed up. The quiet spell matters for
+        // a provider with a FIXED limit: easing after a few seconds walks straight back into
+        // it, so a 429 lands every couple of minutes; one step per quiet spell keeps us at
+        // the spacing that works and only probes faster now and then.
+        if (!_spacingMs[slot]) return false;
+        if (_okStreak[slot] < ADSB_SPACING_EASE_OKS) ++_okStreak[slot];
+        if (_okStreak[slot] < ADSB_SPACING_EASE_OKS) return false;
+        if ((uint32_t)(nowMs - _quietSinceMs[slot]) < ADSB_SPACING_EASE_QUIET_MS) return false;
+        const uint32_t next = (_spacingMs[slot] > ADSB_SPACING_STEP_MS)
+                                ? _spacingMs[slot] - ADSB_SPACING_STEP_MS : 0;
+        // Don't step back onto the spacing that drew the last 429 (a fixed limit would trip
+        // again within seconds); re-test it only once the 429 is an hour old.
+        if (_tripped[slot] && next <= _trippedSpacingMs[slot] &&
+            (uint32_t)(nowMs - _trippedAtMs[slot]) < ADSB_SPACING_PROBE_MS) return false;
         _okStreak[slot] = 0;
-        _spacingMs[slot] = (_spacingMs[slot] > ADSB_SPACING_STEP_MS)
-                             ? _spacingMs[slot] - ADSB_SPACING_STEP_MS : 0;
+        _quietSinceMs[slot] = nowMs;        // the next step down needs another quiet spell
+        _spacingMs[slot] = next;
         return true;
     }
 
@@ -192,8 +210,9 @@ private:
         return anyStreak;
     }
 
-    uint32_t backOff(int slot) {
+    uint32_t backOff(int slot, uint32_t nowMs) {
         _okStreak[slot] = 0;
+        _quietSinceMs[slot] = nowMs;
         uint32_t sp = _spacingMs[slot] ? _spacingMs[slot] * 2 : ADSB_SPACING_STEP_MS;
         if (sp > ADSB_SPACING_MAX_MS) sp = ADSB_SPACING_MAX_MS;
         if (sp == _spacingMs[slot]) return 0;
@@ -205,6 +224,10 @@ private:
     uint32_t _park403Ms[ADSB_PROVIDER_COUNT]      = {0};   // next 403 park length; 0 = base (15 min)
     uint32_t _spacingMs[ADSB_PROVIDER_COUNT]      = {0};
     uint32_t _lastAttemptMs[ADSB_PROVIDER_COUNT]  = {0};
+    uint32_t _quietSinceMs[ADSB_PROVIDER_COUNT]   = {0};   // last back-off or ease (see onOk)
+    uint32_t _trippedSpacingMs[ADSB_PROVIDER_COUNT] = {0}; // spacing in force at the last 429
+    uint32_t _trippedAtMs[ADSB_PROVIDER_COUNT]    = {0};
+    bool     _tripped[ADSB_PROVIDER_COUNT]        = {false};
     uint16_t _okStreak[ADSB_PROVIDER_COUNT]       = {0};
     uint8_t  _transportFails[ADSB_PROVIDER_COUNT] = {0};   // consecutive code<=0 fetches; 0 = last one answered
     uint32_t _silenceMs[ADSB_PROVIDER_COUNT]      = {0};   // gap for a provider that stays silent; 0 after any usable answer

@@ -22,6 +22,21 @@ second measured on a 1.75).
 JSON documents are parsed with a PSRAM allocator (`adsb_client.cpp`) and mbedTLS buffers are
 routed to PSRAM (`mbedtls_platform_set_calloc_free`, `main.cpp`), so TLS never starves internal RAM.
 
+### Idle clock
+`clock_face.h` is the animation model (pure, host-tested in `tests/clock_face_test.cpp`): from
+the radar's sweep angle and the wall clock it gives, per moment, a `ClockFrame` — the sweep
+line / second hand angle and shape, the hour/minute hands' growth, the cap, the trail's
+opacity, and a scene step (0-3). `radar_view` owns the clock: `setClock()` starts or ends it,
+its LVGL timer applies a scene step when it changes (dim the planes and map, hide labels,
+swap N/E/S/W for the 12/3/6/9 dial; one full repaint each, since LVGL renders at ~4-6 fps on
+the device), and `ui.cpp` hides the HUD, zoom button and card and puts a transparent touch
+catcher on `lv_layer_top()`. Everything that moves is drawn by the compositor every tick
+(`radar::clockFrame()`): the lead line becomes the second hand, and the hands and cap are
+anti-aliased segments with their own boxes. Without a compositor (the SDL simulator) the
+clock layer draws the hands in LVGL. `main.cpp` decides when (idle wait, the radar view
+showing, the `clock` switch, no in-range emergency) and ramps the panel brightness with the
+animation.
+
 ## Input
 - Touch → screen coordinates → nearest-glyph hit test (within a tap radius) → select + populate detail card (HDG shows the aircraft's ground track).
 - Swipe gestures switch views; long-press cycles the visual theme; the on-screen zoom button cycles the range preset (10/20/30/50/100 km; the web page also offers 15, 25 and 150 km).
@@ -30,9 +45,9 @@ routed to PSRAM (`mbedtls_platform_set_calloc_free`, `main.cpp`), so TLS never s
 ## Persistence & lifecycle
 - `Preferences` (NVS), namespace `capsuleradar`; keys read in `main.cpp`: `homeLat`, `homeLon`,
   `rangeKm`, `bright`, `vol`, `mute`, `alertmode`, `proxkm`, `usegps`, `traillen`, `maxac`,
-  `idledim`, `fdsleep`, `units`, `tz`, `bigtext`, `theme` (long-press or the web page), `sweep`,
-  `airports`, `hideground`, `minalt`, `maxalt`, `milonly`, `lastview`, `rotDeg` (older installs:
-  `rot`). The route cache has its own namespace, `routes` (`route_client.cpp`).
+  `idledim`, `fdsleep`, `clock`, `units`, `tz`, `bigtext`, `theme` (long-press or the web page),
+  `sweep`, `airports`, `hideground`, `minalt`, `maxalt`, `milonly`, `lastview`, `rotDeg` (older
+  installs: `rot`). The route cache has its own namespace, `routes` (`route_client.cpp`).
 - First boot without saved credentials opens the WiFiManager captive portal (WiFi only; the
   centre lat/lon and every other setting are configured on the device's web page). A held
   BOOT button is NOT wired up — `PIN_BOOT_BUTTON` is defined in the board headers but unused.
@@ -44,7 +59,8 @@ routed to PSRAM (`mbedtls_platform_set_calloc_free`, `main.cpp`), so TLS never s
 - `geo.h` — pure math: haversine, bearing, project-to-screen.
 - `aircraft.h` — `Aircraft` struct + altitude→color + squawk/emergency helpers.
 - `adsb_client.h/.cpp` + `adsb_pacing.h` — HTTPS GET + streaming ArduinoJson parse for the three providers, with host-testable per-provider pacing.
-- `radar_view.h/.cpp` — scope rendering: rings, glyphs, trails, themes, detail-card data.
-- `display.cpp` — panel bring-up and the per-pixel sweep compositor.
-- `ui.cpp` — LVGL views (radar/list/stats), detail card, HUD, zoom button, power-off button.
-- `main.cpp` — tasks, WiFi/portal, web config server, NVS settings, self-heal watchdog.
+- `radar_view.h/.cpp` — scope rendering: rings, glyphs, trails, themes, detail-card data, the idle clock's scene and dial.
+- `clock_face.h` — the idle clock's animation model (host-tested).
+- `display.cpp` — panel bring-up and the per-pixel compositor (sweep, centre ripple, clock hands).
+- `ui.cpp` — LVGL views (radar/list/stats), detail card, HUD, zoom button, power-off button, clock touch catcher.
+- `main.cpp` — tasks, WiFi/portal, web config server, NVS settings, self-heal watchdog, idle clock / dim / brightness.

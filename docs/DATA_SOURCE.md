@@ -62,8 +62,11 @@ Providers are tried in order and paced **individually**:
 - **403** — a policy refusal (needs approval, or a rejected User-Agent). Parked for 15 min,
   doubling up to 6 h; retrying it every poll only burns requests and pushes the others over
   their limits.
-- **429** — too fast. An adaptive minimum spacing doubles on each 429 and eases back after a
-  run of successes. An explicit `Retry-After` wins.
+- **429** — too fast. An adaptive minimum spacing doubles on each 429 and eases back one step
+  after a run of successes *and* 10 minutes without a 429, so a provider with a fixed limit
+  (airplanes.live) is not re-tripped every couple of minutes. It never eases back onto the
+  spacing that drew the last 429 until an hour later, so it settles on the rate that works and
+  re-tests the faster one at most hourly. An explicit `Retry-After` wins.
 - **200 with no aircraft array** — the response parsed but is unusable (a provider changed its
   payload shape, or the chunked-encoding trap below). Same backoff as a 429: without it such a
   provider is re-asked every poll forever, which is exactly the loop that hid the adsb.fi

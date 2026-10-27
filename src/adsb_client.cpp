@@ -243,7 +243,7 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
         // every poll forever — exactly the loop the chunked-response bug produced.
         Serial.printf("[adsb] %s: 200 but no aircraft array (expected=%d read=%u)\n",
                       host, expectedBytes, (unsigned)jsonStream.bytesRead());
-        const uint32_t sp = _pacer.onUnusable(slot);
+        const uint32_t sp = _pacer.onUnusable(slot, millis());
         if (sp)
             Serial.printf("[adsb] %s unusable; spacing requests %us apart\n",
                           host, (unsigned)(sp / 1000));
@@ -253,7 +253,7 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
     // Only now is the response genuinely usable, so only now does it count as a success
     // for pacing purposes.
     _lastHost = host;                   // so the caller can say who served the data
-    if (_pacer.onOk(slot))
+    if (_pacer.onOk(slot, millis()))
         Serial.printf("[adsb] %s steady; spacing eased to %us\n",
                       host, (unsigned)(_pacer.spacingMs(slot) / 1000));
 
