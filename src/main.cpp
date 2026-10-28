@@ -144,7 +144,9 @@ static void adsb_task(void*) {
             // disable WiFi modem power-save: on a mains-powered desk gadget it just adds latency
             // and makes RSSI bounce (feed goes stale -> amber bars) even sitting next to the router.
             WiFi.setSleep(false);
-            Serial.printf("[adsb] WiFi up, IP %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("[adsb] WiFi up, IP %s (AP %s, ch %d, %d dBm)\n",
+                          WiFi.localIP().toString().c_str(), WiFi.BSSIDstr().c_str(),
+                          (int)WiFi.channel(), (int)WiFi.RSSI());
             configTzTime(g_tz.c_str(), "pool.ntp.org", "time.nist.gov");  // local time (web-configurable TZ)
             Serial.println("[web] config: http://capsuleradar.local/  (or the IP above)");
             nextWeatherAt = millis() + 5000UL; // let the first ADS-B poll complete before weather TLS
@@ -1139,6 +1141,28 @@ static void handleUpdateUpload() {
     }
 }
 
+// ---- WiFi: join the strongest access point, not the first one heard ----
+// The core's STA default is a fast scan, which joins the FIRST access point that answers with
+// our SSID. On a mesh (several nodes, one SSID, often one 2.4 GHz channel) that can be a far
+// node with a weak link while a strong one sits next to the radar. Scan every channel and pick
+// by signal instead; it costs a second or two at connect time.
+// setScanMethod/setSortMethod only apply when new credentials are entered (WiFi.begin(ssid,
+// pass)). Reconnecting with SAVED credentials (WiFiManager's autoConnect, our background
+// retry, the driver's auto-reconnect) reuses the stored driver config, so patch that too.
+static void wifi_prefer_strongest_ap() {
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+    if (!WiFi.mode(WIFI_STA)) return;             // the driver must be up to read its config
+    wifi_config_t conf;
+    if (esp_wifi_get_config(WIFI_IF_STA, &conf) != ESP_OK) return;
+    if (conf.sta.scan_method == WIFI_ALL_CHANNEL_SCAN &&
+        conf.sta.sort_method == WIFI_CONNECT_AP_BY_SIGNAL) return;   // already set: no flash write
+    conf.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    conf.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    if (esp_wifi_set_config(WIFI_IF_STA, &conf) == ESP_OK)
+        Serial.println("[wifi] saved network set to join the strongest access point");
+}
+
 void setup() {
     Serial.begin(115200);
     delay(200);
@@ -1261,6 +1285,7 @@ void setup() {
         Serial.println("[wifi] new credentials saved -> rebooting for a clean web/mDNS start");
         g_rebootAtMs = millis() + 2500;   // let the portal deliver its 'saved' page first
     });
+    wifi_prefer_strongest_ap();
     if (g_wm.autoConnect("CapsuleRadar-Setup")) {
         Serial.println("[wifi] connected");
     } else {
