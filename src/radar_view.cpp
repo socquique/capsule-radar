@@ -265,6 +265,11 @@ static void flow_redraw_all(void) {
 }
 
 // =============================== grid ========================================
+// Ring and crosshair sizes were laid out for the AMOLED scope (outer ring 218 px); scale
+// them with the board's outer ring so the spacing stays even on other panels (rounded,
+// exact on the AMOLED boards).
+#define SCOPE_PX(px) ((lv_coord_t)(((px) * RADAR_R_OUTER_PX + 109) / 218))
+
 static void grid_draw_cb(lv_event_t *e) {
     lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
     const lv_point_t c = { s_cx, s_cy };
@@ -311,7 +316,7 @@ static void grid_draw_cb(lv_event_t *e) {
     lv_draw_arc_dsc_init(&ad);
     ad.color = s_cRing;
     ad.width = 2;
-    const lv_coord_t rr[4] = { 50, 104, 160, RADAR_R_OUTER_PX };
+    const lv_coord_t rr[4] = { SCOPE_PX(50), SCOPE_PX(104), SCOPE_PX(160), RADAR_R_OUTER_PX };
     const lv_opa_t   ro[4] = { 66, 66, 66, 87 };
     for (int i = 0; i < 4; ++i) { ad.opa = dim(ro[i]); lv_draw_arc(d, &ad, &c, rr[i], 0, 360); }
 
@@ -320,8 +325,9 @@ static void grid_draw_cb(lv_event_t *e) {
     ll.color = s_cRing;
     ll.width = 2;
     ll.opa = dim(41);
-    lv_point_t h1 = { (lv_coord_t)(s_cx - 211), s_cy }, h2 = { (lv_coord_t)(s_cx + 211), s_cy };
-    lv_point_t v1 = { s_cx, (lv_coord_t)(s_cy - 211) }, v2 = { s_cx, (lv_coord_t)(s_cy + 211) };
+    const lv_coord_t ch = SCOPE_PX(211);
+    lv_point_t h1 = { (lv_coord_t)(s_cx - ch), s_cy }, h2 = { (lv_coord_t)(s_cx + ch), s_cy };
+    lv_point_t v1 = { s_cx, (lv_coord_t)(s_cy - ch) }, v2 = { s_cx, (lv_coord_t)(s_cy + ch) };
     lv_draw_line(d, &ll, &h1, &h2);
     lv_draw_line(d, &ll, &v1, &v2);
 }
