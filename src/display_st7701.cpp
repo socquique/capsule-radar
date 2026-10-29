@@ -33,7 +33,24 @@ static lv_disp_drv_t      s_disp_drv;
 static lv_indev_drv_t     s_indev_drv;
 static lv_color_t        *s_buf1   = nullptr;   // full-screen LVGL buffers (PSRAM)
 static lv_color_t        *s_buf2   = nullptr;
-static lv_color_t        *s_rotBuf = nullptr;   // full-screen scratch for 90/180/270 (PSRAM)
+
+// Page flip: each frame is written (rotated if needed) into the panel framebuffer that is
+// NOT on screen, then handed to draw_bitmap. draw_bitmap only flips when it is given one of
+// the panel's own framebuffers; any other buffer is copied into the one on screen (tearing).
+// The bounce-buffer refill switches to the new buffer when it finishes the frame it is
+// reading (on_bounce_frame_finish); only then is the old one free to draw into.
+static void             *s_fb[2]  = {nullptr, nullptr};
+static int               s_back   = 1;          // panel starts on fbs[0]
+static SemaphoreHandle_t s_flipped = nullptr;
+static volatile bool     s_flipPending = false;   // set after draw_bitmap: the next switch is ours
+
+static bool IRAM_ATTR on_frame_switched(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *, void *) {
+    if (!s_flipPending) return false;
+    s_flipPending = false;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_flipped, &woken);
+    return woken == pdTRUE;
+}
 
 static volatile uint32_t s_frameCount = 0;
 uint32_t display_frames() { return s_frameCount; }
@@ -157,12 +174,14 @@ static bool rgb_panel_begin() {
     cfg.data_width = 16;
     cfg.bits_per_pixel = 16;
     cfg.num_fbs = 2;                        // 2 framebuffers = double-buffered (tear-free page flip).
-    // NO bounce buffer — permanently. Its refill ISR memcpy's from the PSRAM framebuffer, and
-    // PSRAM is unreachable while the cache is disabled during a WiFi/NVS flash op, so the copy
-    // faults ("Cache disabled..." with A4=0x2580=9600=this buffer). Making the ISR IRAM-safe
-    // can't help — the DATA it reads lives in PSRAM. Drift is instead controlled by a modest
-    // pixel clock (RGB_PCLK_HZ) so direct-from-PSRAM DMA comfortably keeps up, plus the
-    // per-VSYNC transmission restart (CONFIG_LCD_RGB_RESTART_IN_VSYNC) which resyncs each frame.
+    // Bounce buffers: 2 x 10 lines in internal RAM (2 x 9.6 KB). The DMA streams from them
+    // and an ISR refills each from the PSRAM framebuffer as it empties (~0.46 ms per 10 lines
+    // at 12 MHz). Streaming straight from PSRAM, the DMA fell behind whenever the CPU or WiFi
+    // was busy in PSRAM and the picture shifted sideways (#49), more with more aircraft.
+    // The refill reads PSRAM, which is unreachable while a WiFi/NVS flash op has the cache
+    // off ("Cache disabled..." with A4=0x2580=9600=this buffer), so the RGB/GDMA ISRs are
+    // NOT IRAM-safe (platformio.ini): they are held off during the flash op instead.
+    cfg.bounce_buffer_size_px = 10 * SCREEN_W;
     cfg.hsync_gpio_num = RGB_HSYNC;
     cfg.vsync_gpio_num = RGB_VSYNC;
     cfg.de_gpio_num    = RGB_DE;
@@ -184,29 +203,46 @@ static bool rgb_panel_begin() {
     if ((err = esp_lcd_panel_init(s_panel)) != ESP_OK) {
         Serial.printf("[display] rgb panel init: %s\n", esp_err_to_name(err)); return false;
     }
+    if ((err = esp_lcd_rgb_panel_get_frame_buffer(s_panel, 2, &s_fb[0], &s_fb[1])) != ESP_OK) {
+        Serial.printf("[display] rgb frame buffers: %s\n", esp_err_to_name(err)); return false;
+    }
+    s_flipped = xSemaphoreCreateBinary();
+    esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+    cbs.on_bounce_frame_finish = on_frame_switched;
+    if (!s_flipped || (err = esp_lcd_rgb_panel_register_event_callbacks(s_panel, &cbs, nullptr)) != ESP_OK) {
+        Serial.printf("[display] rgb flip callback: %s\n", s_flipped ? esp_err_to_name(err) : "no semaphore");
+        return false;
+    }
     Serial.println("[display] RGB panel initialised");
     return true;
 }
 
-// --- LVGL flush: full frame each time (full_refresh=1), rotated into the panel FB -----
+// --- LVGL flush: full frame each time (full_refresh=1), rotated into the back panel FB --
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
     (void)area;
-    lv_color_t *out = px;
+    if (!s_panel || !s_fb[0]) {                 // headless (panel bring-up failed)
+        s_frameCount++;
+        lv_disp_flush_ready(drv);
+        return;
+    }
+    lv_color_t *out = (lv_color_t *)s_fb[s_back];
     const int N = SCREEN_W * SCREEN_H;
-    if (s_rot && s_rotBuf) {
+    if (!s_rot) {
+        memcpy(out, px, N * sizeof(lv_color_t));
+    } else {
         switch (s_rot) {
             case 90:  // 90° CW
                 for (int j = 0; j < SCREEN_H; ++j)
                     for (int i = 0; i < SCREEN_W; ++i)
-                        s_rotBuf[i * SCREEN_H + (SCREEN_H - 1 - j)] = px[j * SCREEN_W + i];
+                        out[i * SCREEN_H + (SCREEN_H - 1 - j)] = px[j * SCREEN_W + i];
                 break;
             case 180:  // 180°
-                for (int k = 0; k < N; ++k) s_rotBuf[k] = px[N - 1 - k];
+                for (int k = 0; k < N; ++k) out[k] = px[N - 1 - k];
                 break;
             case 270:  // 270° CW
                 for (int j = 0; j < SCREEN_H; ++j)
                     for (int i = 0; i < SCREEN_W; ++i)
-                        s_rotBuf[(SCREEN_W - 1 - i) * SCREEN_H + j] = px[j * SCREEN_W + i];
+                        out[(SCREEN_W - 1 - i) * SCREEN_H + j] = px[j * SCREEN_W + i];
                 break;
         }
         if (s_rot % 90) {
@@ -217,16 +253,22 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
                     const float dx = x - c, dy = y - c;
                     const int sx = (int)lroundf(c + s_rotCos * dx + s_rotSin * dy);
                     const int sy = (int)lroundf(c - s_rotSin * dx + s_rotCos * dy);
-                    s_rotBuf[y * SCREEN_W + x].full =
+                    out[y * SCREEN_W + x].full =
                         sx >= 0 && sx < SCREEN_W && sy >= 0 && sy < SCREEN_H
                         ? px[sy * SCREEN_W + sx].full : 0;
                 }
             }
         }
-        out = s_rotBuf;
     }
-    // Whole-screen blit; the second framebuffer makes this a clean page flip (no tearing).
-    if (s_panel) esp_lcd_panel_draw_bitmap(s_panel, 0, 0, SCREEN_W, SCREEN_H, out);
+    // Flip to the frame just written (no copy: it is one of the panel's framebuffers), then
+    // wait until the refill has switched to it, so the other buffer is free for the next
+    // frame. A flash op holds the refill ISR off; after 100 ms carry on (worst case one torn
+    // frame) rather than stall the UI.
+    xSemaphoreTake(s_flipped, 0);               // drop a signal left by an earlier timeout
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, SCREEN_W, SCREEN_H, out);
+    s_flipPending = true;                       // only a switch after this point picks up `out`
+    xSemaphoreTake(s_flipped, pdMS_TO_TICKS(100));
+    s_back ^= 1;
     s_frameCount++;
     lv_disp_flush_ready(drv);
 }
@@ -290,8 +332,7 @@ bool begin() {
     const size_t px = (size_t)SCREEN_W * SCREEN_H;
     s_buf1   = (lv_color_t *)heap_caps_malloc(px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
     s_buf2   = (lv_color_t *)heap_caps_malloc(px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    s_rotBuf = (lv_color_t *)heap_caps_malloc(px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    if (!s_buf1 || !s_buf2 || !s_rotBuf) {
+    if (!s_buf1 || !s_buf2) {
         Serial.println("[display] LVGL PSRAM buffer alloc FAILED");
         return false;
     }
