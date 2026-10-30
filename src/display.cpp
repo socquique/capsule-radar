@@ -752,6 +752,8 @@ static void touch_sample(bool force) {
         case TOUCH_NODATA: s_touchQ.add(TouchQueue::NODATA, 0, 0, now); break;
         case TOUCH_UP:     s_touchQ.add(TouchQueue::UP, 0, 0, now); break;
         case TOUCH_DOWN:
+            x = (uint16_t)((x * SCREEN_W + SCREEN_W / 2) / PANEL_W);   // panel px -> UI px (panel_scale.h)
+            y = (uint16_t)((y * SCREEN_H + SCREEN_H / 2) / PANEL_H);
             if (touch_to_logical(x, y, &lx, &ly))
                 s_touchQ.add(TouchQueue::DOWN, (int16_t)lx, (int16_t)ly, now);
             else

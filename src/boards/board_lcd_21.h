@@ -31,6 +31,7 @@
 
 // ---------- TCA9554PWR I2C GPIO expander (drives lines the ESP32 GPIOs don't) ----------
 #define TCA9554_ADDR        0x20
+#define TCA9554_OUTPUTS     0xFF           // every EXIO is an output, as in the vendor demo
 #define EXIO_LCD_RST        1              // ST7701 reset   (EXIO1)
 #define EXIO_TP_RST         2              // CST820 reset   (EXIO2)
 #define EXIO_AUX            8              // vendor init holds buzzer/aux line low

@@ -1,6 +1,6 @@
-// TCA9554PWR I2C GPIO expander driver. See tca9554.h. BOARD_LCD21 only.
+// TCA9554PWR I2C GPIO expander driver. See tca9554.h. Boards that define TCA9554_ADDR.
 #include "config.h"
-#if defined(BOARD_LCD21)
+#if defined(TCA9554_ADDR)
 #include "tca9554.h"
 #include <Arduino.h>
 #include <Wire.h>
@@ -28,8 +28,8 @@ static void write_reg(uint8_t reg, uint8_t val) {
 }
 
 void tca9554_init() {
-    write_reg(TCA_CONFIG_REG, 0x00);   // all pins output
-    Serial.printf("[tca9554] init @0x%02X (all outputs)\n", TCA9554_ADDR);
+    write_reg(TCA_CONFIG_REG, read_reg(TCA_CONFIG_REG) & (uint8_t)~TCA9554_OUTPUTS);
+    Serial.printf("[tca9554] init @0x%02X (outputs 0x%02X)\n", TCA9554_ADDR, TCA9554_OUTPUTS);
 }
 
 void tca9554_set(uint8_t pin, uint8_t level) {
@@ -46,4 +46,4 @@ uint8_t tca9554_get(uint8_t pin) {
     return (read_reg(TCA_INPUT_REG) >> (pin - 1)) & 0x01;
 }
 
-#endif  // BOARD_LCD21
+#endif  // TCA9554_ADDR

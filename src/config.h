@@ -191,6 +191,12 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #  error "board header: QSPI/I2C pins are placeholders (-1). Fill in the real values."
 #endif
 
+// The panel is the UI's size unless the board header says otherwise (panel_scale.h resamples).
+#ifndef PANEL_W
+#define PANEL_W SCREEN_W
+#define PANEL_H SCREEN_H
+#endif
+
 // Parts every other board has (or probes for at runtime); a header sets 0 to compile one out.
 #ifndef BOARD_HAS_IMU
 #define BOARD_HAS_IMU 1
