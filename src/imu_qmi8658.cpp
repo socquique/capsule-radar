@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#if BOARD_HAS_IMU
 #define QMI_WHOAMI  0x00   // -> 0x05
 #define QMI_CTRL1   0x02   // serial interface / addr auto-increment
 #define QMI_CTRL2   0x03   // accel: full-scale + ODR
@@ -58,3 +59,10 @@ bool imu_read_az(int16_t *az) {
     *az = (int16_t)((b[1] << 8) | b[0]);
     return true;
 }
+
+#else   // !BOARD_HAS_IMU
+
+bool imu_begin()             { return false; }
+bool imu_read_az(int16_t *)  { return false; }
+
+#endif  // BOARD_HAS_IMU

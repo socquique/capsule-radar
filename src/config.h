@@ -191,6 +191,14 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #  error "board header: QSPI/I2C pins are placeholders (-1). Fill in the real values."
 #endif
 
+// Parts every other board has (or probes for at runtime); a header sets 0 to compile one out.
+#ifndef BOARD_HAS_IMU
+#define BOARD_HAS_IMU 1
+#endif
+#ifndef BOARD_HAS_GPS
+#define BOARD_HAS_GPS 1
+#endif
+
 #ifndef ADSB_TASK_STACK_BYTES
 #define ADSB_TASK_STACK_BYTES 16384
 #endif
