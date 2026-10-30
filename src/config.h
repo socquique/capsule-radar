@@ -175,6 +175,7 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 // default so an unflagged build behaves exactly as before.
 //   -DBOARD_LCD21       -> Waveshare ESP32-S3-Touch-LCD-2.1
 //   -DBOARD_AMOLED_143  -> Waveshare ESP32-S3-Touch-AMOLED-1.43
+//   -DBOARD_LCD185C_V2  -> Waveshare ESP32-S3-Touch-LCD-1.85C V2
 //   (none)              -> Waveshare ESP32-S3-Touch-AMOLED-1.75  (reference board)
 // Never guess pins for a new board: take them from the vendor demo or the Arduino
 // core board variant, then confirm them on hardware before committing.
@@ -182,6 +183,8 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #  include "boards/board_lcd_21.h"
 #elif defined(BOARD_AMOLED_143)
 #  include "boards/board_amoled_143.h"
+#elif defined(BOARD_LCD185C_V2)
+#  include "boards/board_lcd_185c_v2.h"
 #else
 #  include "boards/board_amoled_175.h"
 #endif

@@ -6,7 +6,7 @@
 // controller's reset is tied to the panel reset and it is absent from I2C until then.
 // The actual UI is built by ui_boot_create() (shared with the native SDL sim).
 #include "config.h"
-#if !defined(BOARD_LCD21)      // CO5300 AMOLED driver (1.75 + 1.43); the LCD-2.1 build uses display_st7701.cpp
+#if !defined(BOARD_LCD21)      // CO5300 AMOLED (1.75, 1.43) + ST77916 LCD (1.85C V2); the LCD-2.1 build uses display_st7701.cpp
 #include "display.h"
 #include "radar_view.h"
 #include "ui.h"
@@ -21,10 +21,15 @@
 #include <string.h>
 
 // --- Arduino_GFX panel -------------------------------------------------------
+#if defined(BOARD_LCD185C_V2)
+#include "panel_st77916.h"
+static Arduino_GFX     *s_gfx = nullptr;   // brightness is the LEDC backlight, not a panel command
+#else
 // Typed as Arduino_CO5300* (not Arduino_GFX*) so setBrightness() — declared on
 // Arduino_OLED, not the GFX base — is reachable.
 static Arduino_DataBus *s_bus = nullptr;
 static Arduino_CO5300  *s_gfx = nullptr;
+#endif
 
 // --- LVGL plumbing -----------------------------------------------------------
 #define LVGL_BUF_LINES 40    // partial draw-buffer height (lines); kept in fast internal RAM
@@ -45,6 +50,7 @@ static int32_t    s_rotSinQ16 = 0;
 static lv_color_t *s_rotBuf = nullptr;       // PSRAM scratch for rotated output (see begin())
 static lv_color_t *s_frameBuf = nullptr;     // full logical framebuffer for arbitrary-angle sampling
 
+#if PANEL_W == SCREEN_W
 static void panel_push(int16_t x, int16_t y, uint16_t *pixels, uint16_t w, uint16_t h) {
 #if (LV_COLOR_16_SWAP != 0)
     s_gfx->draw16bitBeRGBBitmap(x, y, pixels, w, h);
@@ -52,6 +58,14 @@ static void panel_push(int16_t x, int16_t y, uint16_t *pixels, uint16_t w, uint1
     s_gfx->draw16bitRGBBitmap(x, y, pixels, w, h);
 #endif
 }
+#else
+#include "panel_scale.h"
+static_assert(LV_COLOR_16_SWAP == 0, "PanelScaler blends native-order RGB565");
+static PanelScaler s_scaler;
+static void panel_push(int16_t x, int16_t y, uint16_t *pixels, uint16_t w, uint16_t h) {
+    s_scaler.push(x, y, pixels, w, h);
+}
+#endif
 
 // --- sweep compositor ----------------------------------------------------------------
 // Idea and blend from ijord's 2.8C fork (46e0822e, upstream issue #14), re-written for
@@ -782,6 +796,14 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
 namespace display {
 
 bool begin() {
+#if defined(BOARD_LCD185C_V2)
+    Serial.println("[display] init ST77916 QSPI...");
+    s_gfx = st77916_begin();
+    if (!s_gfx) {
+        Serial.println("[display] ST77916 init FAILED");
+        return false;
+    }
+#else
     Serial.println("[display] init CO5300 QSPI...");
     s_bus = new Arduino_ESP32QSPI(PIN_LCD_CS, PIN_LCD_SCLK,
                                   PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3);
@@ -792,8 +814,15 @@ bool begin() {
         Serial.println("[display] gfx->begin() FAILED");
         return false;
     }
+#endif
+#if PANEL_W != SCREEN_W
+    if (!s_scaler.begin(s_gfx)) {
+        Serial.println("[display] resampler buffers FAILED");
+        return false;
+    }
+#endif
     s_gfx->fillScreen(RGB565_BLACK);
-    s_gfx->setBrightness(BRIGHTNESS_DEFAULT);
+    setBrightness(BRIGHTNESS_DEFAULT);
     Serial.println("[display] panel up; init LVGL...");
 
     lv_init();
@@ -876,7 +905,11 @@ bool sweepAvailable() { return sweep_ready(); }
 float sweepAngleDeg() { return (float)(s_swPhase >> 8) * (360.0f / (float)ANG_UNITS); }
 
 void setBrightness(uint8_t v) {
+#if defined(BOARD_LCD185C_V2)
+    if (s_gfx) st77916_set_brightness(v);
+#else
     if (s_gfx) s_gfx->setBrightness(v);
+#endif
     s_touchQ.setWakeOnly(v == 0);   // a dark panel takes a touch only as a wake-up
 }
 
