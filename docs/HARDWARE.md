@@ -1,8 +1,9 @@
 # Hardware
 
-Capsule Radar supports two Waveshare round-AMOLED boards. Both use the same SoC and
-the same 466×466 CO5300 panel, but their **pin maps have nothing in common** — flashing
-one board's image onto the other gives a black screen and a silent I2C bus.
+Capsule Radar supports two Waveshare round-AMOLED boards and the round LCD-1.85C V2.
+The AMOLED boards use the same SoC and the same 466×466 CO5300 panel, but their **pin
+maps have nothing in common** — flashing one board's image onto another gives a black
+screen and a silent I2C bus.
 
 Pin maps live one-per-board in [`../src/boards/`](../src/boards/) and are selected by a
 build flag (see [`../src/config.h`](../src/config.h)):
@@ -11,6 +12,7 @@ build flag (see [`../src/config.h`](../src/config.h)):
 |---|---|---|---|
 | ESP32-S3-Touch-AMOLED-1.75 (reference) | `esp32-s3-amoled-175` | *(default)* | `board_amoled_175.h` |
 | ESP32-S3-Touch-AMOLED-1.43 | `esp32-s3-amoled-143` | `-DBOARD_AMOLED_143` | `board_amoled_143.h` |
+| ESP32-S3-Touch-LCD-1.85C V2 | `esp32-s3-lcd-185c-v2` | `-DBOARD_LCD185C_V2` | `board_lcd_185c_v2.h` |
 
 ---
 
@@ -84,12 +86,58 @@ full-panel rim-ring test card one pixel at a time until it centred.
 
 ---
 
+## ESP32-S3-Touch-LCD-1.85C V2
+
+ESP32-S3R8 with 8 MB octal PSRAM and 16 MB flash, like the AMOLED boards. Only the V2
+board (PCB Rev2.0) is covered; V1 has different audio hardware. Differences that matter:
+
+- **The display is a 360×360 ST77916 LCD** over QSPI, driven by Arduino_GFX's
+  `Arduino_ST77916`. Brightness is an LEDC PWM on GPIO 5, not a panel command.
+- **The UI stays 466×466.** `src/panel_scale.h` resamples every write to the panel
+  (bilinear). Touch drivers report panel pixels, and `display.cpp` scales them back up
+  to UI pixels. The panel has no column or row gap.
+- **Two glass revisions** need different init tables. At boot the firmware reads the
+  panel ID (command 0x04 at 3 MHz): `00 7F 7F 7F` selects Waveshare's default table and
+  `00 02 7F 7F` its newer one. Any other ID leaves the display off rather than guess.
+  `tools/gen_st77916_init.py` generates `src/st77916_ws185_init.h` from those tables.
+- **Panel and touch resets are on a TCA9554** at `0x20`: P0 resets the touch and P1 the
+  panel. The firmware makes only P0 and P1 outputs and leaves the other pins alone.
+- **Touch is a CST816** at `0x15` (chip ID `0xB5`), polled. It uses the CST820 driver.
+- **No PMIC, no IMU, no GPS.** Battery, face-down sleep and GPS compile out
+  (`BOARD_HAS_PMIC`, `BOARD_HAS_IMU`, `BOARD_HAS_GPS`). The PCF85063 RTC is fitted.
+
+| Signal | GPIO | | Signal | GPIO |
+|---|---|---|---|---|
+| LCD CS | 21 | | I2C SDA | 11 |
+| LCD QSPI SCLK | 40 | | I2C SCL | 10 |
+| LCD QSPI D0–D3 | 46, 45, 42, 41 | | I2S MCLK / BCLK | 2 / 48 |
+| LCD backlight | 5 (LEDC) | | I2S LRCLK | 38 |
+| LCD / touch reset | TCA9554 P1 / P0 | | I2S DOUT / DIN | 47 / 39 |
+| Touch INT | not used (polled) | | Speaker amp enable | 15 |
+
+I2C: CST816 `0x15`, ES8311 `0x18`, TCA9554 `0x20`, ES7210 `0x40` (microphones, not
+used), PCF85063 `0x51`. QSPI clock 80 MHz.
+
+**Sources.** Pins, the reset wiring and the two ST77916 init tables come from
+Waveshare's [factory demo](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-1.85C/tree/8ead4a96bf3a278fc4ebd8ef4768657e17fa2880)
+and [V2 schematic](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.85C/ESP32-S3-Touch-LCD-1.85C_V2.pdf),
+as used by the working port in [Hermes Gadget SDK](https://github.com/Adolanium/hermes-gadget-sdk)
+(MIT). The panel-ID check and the expander reset are adapted from that port. The init
+tables are Apache-2.0 (Espressif Systems); their notice is in `src/st77916_ws185_init.h`.
+Each was then confirmed on hardware: the boot log shows the expander, the panel ID
+`00 02 7F 7F` and touch chip ID `0xB5`; an I2C scan answers `0x15 0x18 0x20 0x40 0x51`;
+a full-panel rim-ring test card was centred with no edge cut off and the colours in
+order; and an on-screen dot followed a fingertip.
+
+---
+
 ## Adding another board
 
 1. Copy a header in `src/boards/`, fill in the pins **from the vendor demo or the Arduino
    core board variant** — never guess them.
 2. Add an `[env:…]` in `platformio.ini` that `extends = amoled_common` and sets `-DBOARD_…`.
-3. Set `BOARD_HAS_PMIC` / `BOARD_HAS_AUDIO` / `TOUCH_DRIVER_…` for what is actually fitted;
+3. Set `BOARD_HAS_PMIC` / `BOARD_HAS_AUDIO` / `BOARD_HAS_IMU` /
+   `BOARD_HAS_GPS` / `TOUCH_DRIVER_…` for what is actually fitted;
    add a touch driver alongside `touch_cst9217.cpp` / `touch_ft3168.cpp` if needed.
 4. Confirm on hardware before committing: I2C scan, a full-panel test pattern for the gap,
    and a touch dot that lands under your fingertip.
