@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [esp32-s3-amoled-175, esp32-s3-amoled-143, esp32-s3-lcd-21]
+        env: [esp32-s3-amoled-175, esp32-s3-amoled-143, esp32-s3-lcd-21, esp32-s3-lcd-185c-v2]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,6 +45,7 @@ jobs:
             esp32-s3-amoled-175) sfx="" ;;
             esp32-s3-amoled-143) sfx="-amoled143" ;;
             esp32-s3-lcd-21) sfx="-lcd21" ;;
+            esp32-s3-lcd-185c-v2) sfx="-lcd185c" ;;
           esac
           bootloader="$b/bootloader.bin"
           if [ ! -f "$bootloader" ]; then

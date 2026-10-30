@@ -84,6 +84,21 @@ PSRAM enabled for RGB refresh during WiFi flash operations. Its initial build ta
 longer than the AMOLED environments. The QSPI sweep compositor remains enabled on
 AMOLED; the RGB panel uses the shared LVGL sweep renderer.
 
+### Waveshare ESP32-S3-Touch-LCD-1.85C V2 (experimental)
+
+The V2 board (PCB Rev2.0) has a 360×360 ST77916 QSPI LCD with a PWM backlight, CST816
+touch, a TCA9554 expander for the panel and touch resets, an ES8311 speaker codec and a
+PCF85063 RTC. It has no PMIC (no battery readout) and no IMU (no face-down sleep).
+V1 boards have different audio hardware; this image is not for them.
+
+The UI keeps its 466×466 layout and the firmware scales each frame down to the panel, so
+text is a little smaller than on the AMOLED boards. The web page's **Large text** option
+helps. Its pin map lives in `src/boards/board_lcd_185c_v2.h`.
+
+Build with `pio run -e esp32-s3-lcd-185c-v2`; upload over USB with `-t upload`, or use
+`pio run -e esp32-s3-lcd-185c-v2-ota -t upload` once connected to WiFi. Release assets
+include `CapsuleRadar-esp32s3-lcd185c.bin` and `CapsuleRadar-ota-lcd185c.bin`.
+
 ### Where to buy the board
 
 The 1.75″ board is in a **global stock squeeze** right now (even Waveshare lists it on backorder), so availability moves week to week. The official store is the reference; the Amazon links are what is actually in stock as of this writing.

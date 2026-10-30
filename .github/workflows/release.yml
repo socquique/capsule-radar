@@ -10,6 +10,7 @@ name: Release firmware
 #   esp32-s3-amoled-175 -> CapsuleRadar-*             (ESP32-S3-Touch-AMOLED-1.75, CO5300)
 #   esp32-s3-amoled-143 -> CapsuleRadar-*-amoled143   (ESP32-S3-Touch-AMOLED-1.43, CO5300)
 #   esp32-s3-lcd-21     -> CapsuleRadar-*-lcd21       (ESP32-S3-Touch-LCD-2.1, ST7701 480x480)
+#   esp32-s3-lcd-185c-v2 -> CapsuleRadar-*-lcd185c    (ESP32-S3-Touch-LCD-1.85C V2, ST77916 360x360)
 
 on:
   push:
@@ -77,6 +78,7 @@ jobs:
           build esp32-s3-amoled-175 ""
           build esp32-s3-amoled-143 "-amoled143"
           build esp32-s3-lcd-21 "-lcd21"
+          build esp32-s3-lcd-185c-v2 "-lcd185c"
 
       - name: Verify sdkconfig IRAM flags (LCD-2.1)
         run: |
@@ -97,9 +99,11 @@ jobs:
             CapsuleRadar-ota-amoled143.bin
             CapsuleRadar-esp32s3-lcd21.bin
             CapsuleRadar-ota-lcd21.bin
+            CapsuleRadar-esp32s3-lcd185c.bin
+            CapsuleRadar-ota-lcd185c.bin
           generate_release_notes: true
           body: |
-            Three boards are supported. Match the file suffix to your hardware:
+            Four boards are supported. Match the file suffix to your hardware:
 
             **First flash (USB):** `*-esp32s3*.bin` — the full merged image (offset `0x0`).
             - Browser, no toolchain: https://socquique.github.io/capsule-radar/
@@ -113,6 +117,8 @@ jobs:
             Files with `amoled143` in the name are for the **ESP32-S3-Touch-AMOLED-1.43**.
             Files with `lcd21` in the name are for the **ESP32-S3-Touch-LCD-2.1** (experimental:
             the picture can shift sideways at times, see #49).
+            Files with `lcd185c` in the name are for the **ESP32-S3-Touch-LCD-1.85C V2**
+            (experimental; V2 / Rev2.0 PCB only, not V1).
             The boards have completely different pin maps — the wrong image gives a
             black screen, so check your board before flashing. (The browser flasher
             currently supports the AMOLED boards.)

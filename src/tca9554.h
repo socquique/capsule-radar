@@ -1,5 +1,5 @@
 #pragma once
-// TCA9554PWR I2C GPIO expander (BOARD_LCD21 only).
+// TCA9554PWR I2C GPIO expander (boards that define TCA9554_ADDR: LCD 2.1, LCD 1.85C V2).
 //
 // On the ESP32-S3-Touch-LCD-2.1 a few control lines the SoC GPIOs don't reach are wired
 // to this expander: the ST7701 reset (EXIO1) + chip-select (EXIO3) and the CST820 touch
@@ -7,7 +7,8 @@
 // and pointed at the shared global `Wire` bus (init'd on PIN_I2C_SDA/SCL by the display).
 #include <stdint.h>
 
-// Configure all 8 EXIO as outputs (mode bits: 0 = output). Call after Wire.begin().
+// Make the board's TCA9554_OUTPUTS pins outputs (mode bits: 0 = output); the others keep
+// their direction. Call after Wire.begin().
 void tca9554_init();
 
 // Set one EXIO pin (1..8) high/low without disturbing the others.
