@@ -806,8 +806,11 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
         }
         if (s_rot % 90) {
             // Inverse-map output pixels around the centre; round panel corners are black.
+            // A whole frame arrives in one flush, so keep sampling the touch panel while it is
+            // rotated, or a quick tap that starts and ends in here never reaches LVGL.
             const float c = (SCREEN_W - 1) * 0.5f;
             for (int y = 0; y < SCREEN_H; ++y) {
+                if ((y & 15) == 0) touch_sample(false);
                 for (int x = 0; x < SCREEN_W; ++x) {
                     const float dx = x - c, dy = y - c;
                     const int sx = (int)lroundf(c + s_rotCos * dx + s_rotSin * dy);
@@ -824,6 +827,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
         memcpy(s_phys, out, N * sizeof(lv_color_t));
         overlays_blend((uint16_t *)out, 0, 0, SCREEN_W, Rect{ 0, 0, SCREEN_W - 1, SCREEN_H - 1, true });
     }
+    touch_sample(false);
     // Flip to the frame just written (no copy: it is one of the panel's framebuffers), then
     // wait until the refill has switched to it, so the other buffer is free for the next
     // frame. A flash op holds the refill ISR off; after 100 ms carry on (worst case one torn
@@ -832,6 +836,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
     esp_lcd_panel_draw_bitmap(s_panel, 0, 0, SCREEN_W, SCREEN_H, out);
     s_flipPending = true;                       // only a switch after this point picks up `out`
     xSemaphoreTake(s_flipped, pdMS_TO_TICKS(100));
+    touch_sample(false);
     s_back ^= 1;
     s_frameCount++;
     lv_disp_flush_ready(drv);
