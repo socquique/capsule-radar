@@ -102,6 +102,9 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define CLOCK_MTICK_OPA       80
 
 // ---------- Touch ----------
+// A still hold on the radar this long cycles the theme, on lift (ui.cpp). LVGL's 400 ms long
+// press caught firm taps: tapping off a plane card with a half-second press changed the theme.
+#define UI_THEME_HOLD_MS        1500
 // LVGL reads the touch panel only between frames, and a swipe redraws the whole screen on
 // every frame (~150-200 ms on the device). display.cpp also samples the panel between the
 // flush strips of a frame and replays the samples to LVGL in order (touch_queue.h).
