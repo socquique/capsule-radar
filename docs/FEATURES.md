@@ -13,7 +13,7 @@ Visual target: `assets/plane_radar_2.0_mockup.html`.
 - Top HUD: WiFi strength, aircraft count, clock.
 
 ## Functions (the "more")
-1. **Touch to inspect** — tap nearest glyph → detail card: callsign, type, altitude, ground speed, vertical speed, distance, heading (the aircraft's ground track), squawk, and origin → destination. Registration on the card is *not built yet*.
+1. **Touch to inspect** — tap nearest glyph → detail card: callsign, type, altitude, ground speed, vertical speed, distance, heading (the aircraft's ground track), squawk, and origin → destination. The X in the card's corner closes it, as does a tap on empty scope. Registration on the card is *not built yet*.
 2. **Views** (swipe): Radar · List (sorted by distance) · Stats (count, closest, max altitude and range) · Weather. Tap an aircraft to open its detail card.
 3. **Range zoom** — the on-screen zoom button cycles 10 / 20 / 30 / 50 / 100 km and re-queries the aircraft feed accordingly. The web page offers 10 / 15 / 25 / 30 / 50 / 100 / 150 km.
 4. **Orientation** — north-up ↔ track-up toggle. *Not built yet: the scope is north-up only.*

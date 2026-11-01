@@ -111,6 +111,8 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define TOUCH_SAMPLE_MS         20
 #define TOUCH_NODATA_RELEASE_MS 100  // failed reads for this long while pressed count as a lift
 #define TOUCH_QUEUE_LEN         32   // samples held between two LVGL reads (a full frame adds ~10)
+// The plane card's X (ui.cpp): its tap area grows this much on every side, inside the card.
+#define UI_CARD_CLOSE_HIT       12
 
 // ---------- ADS-B API (free, non-commercial) ----------
 // Providers are tried in this order; each is paced independently (see AdsbClient).
