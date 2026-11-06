@@ -41,7 +41,7 @@ animation.
 - Touch → screen coordinates → nearest-glyph hit test (within a tap radius) → select + populate detail card (HDG shows the aircraft's ground track).
 - Swipe gestures switch views; long-press cycles the visual theme; the on-screen zoom button cycles the range preset (10/20/30/50/100 km; the web page also offers 15, 25 and 150 km).
 - IMU posture from QMI8658 drives face-down sleep; touch inactivity drives the idle dim; LVGL indev for touch. While the screen is dark, a touch only wakes it and never reaches the UI.
-- The X in the detail card's top-right corner clears the selection, as a tap on empty scope does. It is a child of the card, so it hides with it and sits under the card's sweep mask.
+- The X in the detail card's top-right corner clears the selection, as a tap on empty scope does. It is a child of the card, so it hides with it and sits under the card's sweep mask. A tap within `UI_CARD_CLOSE_MARGIN` (12 px) outside the open card also clears it, even on a plane.
 
 ## Persistence & lifecycle
 - `Preferences` (NVS), namespace `capsuleradar`; keys read in `main.cpp`: `homeLat`, `homeLon`,
