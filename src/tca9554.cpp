@@ -30,8 +30,10 @@ static void write_reg(uint8_t reg, uint8_t val) {
 }
 
 void tca9554_init() {
-    uint8_t cfg;
-    if (!read_reg(TCA_CONFIG_REG, &cfg)) return;
+    // On a failed read, start from the power-on default (all inputs): the board still gets
+    // its outputs, and only those. Skipping the write would leave the LCD 2.1's resets undriven.
+    uint8_t cfg = 0xFF;
+    read_reg(TCA_CONFIG_REG, &cfg);
     write_reg(TCA_CONFIG_REG, cfg & (uint8_t)~TCA9554_OUTPUTS);
     Serial.printf("[tca9554] init @0x%02X (outputs 0x%02X)\n", TCA9554_ADDR, TCA9554_OUTPUTS);
 }
