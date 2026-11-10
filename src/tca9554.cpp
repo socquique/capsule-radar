@@ -9,8 +9,9 @@
 #define TCA_OUTPUT_REG  0x01   // output latch
 #define TCA_CONFIG_REG  0x03   // direction: 1 = input, 0 = output
 
-// False on a failed read. A read-modify-write must then skip its write: writing back a 0
-// makes every pin an output (direction) or drives every other output low (latch).
+// False on a failed read. Writing back a 0 would make every pin an output (direction) or
+// drive every other output low (latch), so tca9554_set() skips its write and
+// tca9554_init() starts from the power-on direction instead.
 static bool read_reg(uint8_t reg, uint8_t *val) {
     Wire.beginTransmission(TCA9554_ADDR);
     Wire.write(reg);

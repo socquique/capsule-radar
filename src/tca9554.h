@@ -8,7 +8,8 @@
 #include <stdint.h>
 
 // Make the board's TCA9554_OUTPUTS pins outputs (mode bits: 0 = output); the others keep
-// their direction. Call after Wire.begin().
+// their direction, or become inputs (the power-on default) if the direction can't be read.
+// Call after Wire.begin().
 void tca9554_init();
 
 // Set one EXIO pin (1..8) high/low without disturbing the others.
