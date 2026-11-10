@@ -385,7 +385,7 @@ static void onRangeChange(float km) {
     ui_on_data_updated();
 }
 
-// Persist the visual theme in NVS (called when the user long-presses to switch).
+// Persist the visual theme in NVS (called when the user holds the radar to switch it).
 static void saveTheme(int t) {
     Preferences p;
     p.begin("capsuleradar", false);

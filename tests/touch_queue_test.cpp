@@ -149,8 +149,8 @@ int main() {
         assert(same(q.delivered(), 0, 0, false));       // LVGL still sees no press
     }
 
-    // --- a long press that starts dark stays held after the screen lights, up to the lift:
-    //     no long press (theme change), no click; the next press reaches LVGL ---
+    // --- a hold that starts dark stays held after the screen lights, up to the lift:
+    //     no theme change, no click; the next press reaches LVGL ---
     {
         TouchQueue q;
         q.setWakeOnly(true);

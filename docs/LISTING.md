@@ -48,7 +48,7 @@ engraved logo. No soldering — the Waveshare board carries all the electronics.
 - **Swipe** between three circular views: **Radar**, **List**, and **Stats**.
 - **On-screen zoom button** cycles the display range (10 / 20 / 30 / 50 / 100 km) and
   shows the current value.
-- **Long-press** the screen to cycle the visual theme.
+- **Hold the radar still** for 1.5 s, then lift, to cycle the visual theme.
 
 **Four themes** (remembered across reboots)
 - **Phosphor** — classic green-on-black radar scope: rings, sweep, altitude colours.
@@ -196,7 +196,7 @@ Once it's running, you can update wirelessly:
 | Inspect an aircraft | **Tap** it → detail card with route |
 | Switch view | **Swipe** left/right (Radar ↔ List ↔ Stats) |
 | Change zoom range | **Tap the range button** (⟳ … km) |
-| Change theme | **Long-press** the screen |
+| Change theme | **Hold** the radar still for 1.5 s, then lift |
 | Turn the screen off | **Flip it face-down** |
 | Find the config page | See the **Stats** view footer (shows `capsuleradar.local` + IP) |
 
