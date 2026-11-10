@@ -94,9 +94,14 @@ static float dist_val(float km) {
 }
 static const char *dist_unit(void) { return s_units == 0 ? "nm" : (s_units == 2 ? "mi" : "km"); }
 
-static float weather_temp(float c) { return s_units == 2 ? c * 1.8f + 32.0f : c; }
+// Weather temperature: 0 = follow the Units preset (°F with Imperial, °C otherwise),
+// 1 = always °C, 2 = always °F. Wind stays with the Units preset.
+static int s_tempUnit = 0;
+void ui_set_temp_unit(int t) { s_tempUnit = (t < 0 || t > 2) ? 0 : t; }
+static bool temp_in_f(void) { return s_tempUnit == 2 || (s_tempUnit == 0 && s_units == 2); }
+static float weather_temp(float c) { return temp_in_f() ? c * 1.8f + 32.0f : c; }
 // "\xC2\xB0" is the UTF-8 degree sign; LVGL's built-in Montserrat fonts carry it (U+00B0).
-static const char *weather_temp_unit(void) { return s_units == 2 ? "\xC2\xB0" "F" : "\xC2\xB0" "C"; }
+static const char *weather_temp_unit(void) { return temp_in_f() ? "\xC2\xB0" "F" : "\xC2\xB0" "C"; }
 static float weather_wind(float kmh) {
     if (s_units == 0) return kmh * 0.539957f;
     if (s_units == 2) return kmh * 0.621371f;

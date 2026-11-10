@@ -71,6 +71,7 @@ static bool                  g_fdSleep = true;                       // face-dow
 static bool                  g_clockOn = true;                       // idle clock instead of the idle dim (web/NVS)
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
+static int                   g_tempUnit = 0;                         // weather temp: 0=follow Units 1=°C 2=°F (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static bool                  g_hideGround   = false;                 // skip on-ground aircraft in the feed (web/NVS)
 static int                   g_minAltFt     = 0;                     // only show aircraft above this altitude, ft (0 = off) (web/NVS)
@@ -318,6 +319,7 @@ static void loadSettings() {
     g_fdSleep          = p.getBool("fdsleep", true);
     g_clockOn          = p.getBool("clock", true);
     g_units            = p.getInt("units", 0);
+    g_tempUnit         = p.getInt("tempu", 0);
     g_tz               = p.getString("tz", TZ_STR);
     g_bigText          = p.getBool("bigtext", false);
     p.end();
@@ -539,12 +541,19 @@ static void handleRoot() {
         iopts += o;
     }
     { char o[64]; snprintf(o, sizeof(o), "<option value=0%s>Never</option>", curIdle == 0 ? " selected" : ""); iopts += o; }
-    const char *unames[] = {"Aviation (ft, kt, nm)", "Metric (m, km/h, km)", "Imperial (ft, mph, mi)"};
+    const char *unames[] = {"Aviation (ft, kt, nm, \xC2\xB0" "C)", "Metric (m, km/h, km, \xC2\xB0" "C)", "Imperial (ft, mph, mi, \xC2\xB0" "F)"};
     String uopts;
     for (int i = 0; i < 3; ++i) {
         char o[96];
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_units ? " selected" : "", unames[i]);
         uopts += o;
+    }
+    const char *tunames[] = {"Same as Units", "\xC2\xB0" "C", "\xC2\xB0" "F"};
+    String tuopts;
+    for (int i = 0; i < 3; ++i) {
+        char o[64];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_tempUnit ? " selected" : "", tunames[i]);
+        tuopts += o;
     }
     const char *tlnames[] = {"Off", "Short", "Medium", "Long"};
     String tlopts;
@@ -679,7 +688,8 @@ static void handleRoot() {
         "<label><input type=checkbox class=ck %s onchange='bt(this.checked)'>Large text (restarts the device)</label>"
         "<label>Screen rotation (degrees clockwise)</label>"
         "<input type=number min=0 max=359 step=1 value='%d' onchange='ro(this.value)'>"
-        "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
+        "<label>Units</label><select onchange='u(this.value)'>%s</select>"
+        "<label>Weather temperature</label><select onchange='tu(this.value)'>%s</select></div>"
         "<div class=card><div class=t>Sound</div>"
         "<label>Volume</label>"
         "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
@@ -717,6 +727,7 @@ static void handleRoot() {
         "function bt(c){G('/bigtext?v='+(c?1:0)+'&save=1')}"
         "function ro(v){G('/rotate?v='+v+'&save=1')}"
         "function u(v){G('/units?v='+v+'&save=1')}"
+        "function tu(v){G('/tempu?v='+v+'&save=1')}"
         "function al(v){G('/alerts?mode='+v+'&save=1')}"
         "function px(v){G('/alerts?prox='+v+'&save=1')}"
         "function gp(c){G('/gps?v='+(c?1:0)+'&save=1')}"
@@ -733,7 +744,7 @@ static void handleRoot() {
         tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_clockOn ? "checked" : "", g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
-        tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
+        tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(), tuopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     if (len >= (int)BUFSZ)   // truncated page = broken <script>; make it loud, not silent
@@ -886,6 +897,22 @@ static void handleUnits() {   // measurement units preset (live re-render)
             Preferences p;
             p.begin("capsuleradar", false);
             p.putInt("units", g_units);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleTempUnit() {   // weather temperature unit (live re-render)
+    if (refuseUnlessPageFetch()) return;
+    if (g_web.hasArg("v")) {
+        g_tempUnit = constrain((int)g_web.arg("v").toInt(), 0, 2);
+        ui_set_temp_unit(g_tempUnit);
+        ui_on_data_updated();                  // re-render the weather view if it is on screen
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("tempu", g_tempUnit);
             p.end();
         }
     }
@@ -1230,6 +1257,7 @@ void setup() {
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
     ui_set_units(g_units);                       // apply saved unit preset
+    ui_set_temp_unit(g_tempUnit);                // and the weather temperature unit
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
     // (power-off button: registered below, only when the PMIC actually answered)
 
@@ -1338,6 +1366,7 @@ void setup() {
     });
     g_web.on("/gps", handleGps);
     g_web.on("/units", handleUnits);
+    g_web.on("/tempu", handleTempUnit);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/update", HTTP_POST,
         []() {
