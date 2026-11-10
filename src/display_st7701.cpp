@@ -495,8 +495,8 @@ static Rect pulse_box(float ro) {
     return r;
 }
 
-// Physical box of the wedge at angle `u`, padded and aligned for the CO5300 (even start,
-// odd end).
+// Physical box of the wedge at angle `u`, padded. The even start / odd end is kept from
+// display.cpp (the CO5300 needs it); the RGB panel doesn't, and it costs at most a pixel.
 static Rect wedge_box(int u) {
     float pcx, pcy;
     log_to_phys((float)SCREEN_CX, (float)SCREEN_CY, &pcx, &pcy);
@@ -782,44 +782,24 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
         lv_disp_flush_ready(drv);
         return;
     }
-    // Whole frame (angles other than 0/90/180/270): rotate it into the framebuffer NOT on
-    // screen and flip to it.
+    // Whole frame: only angles other than 0/90/180/270 come here (full_refresh is set only
+    // for them; 0/90/180/270 use partial refresh above). Rotate it into the framebuffer NOT
+    // on screen and flip to it.
     lv_color_t *out = (lv_color_t *)s_fb[s_back];
     const int N = SCREEN_W * SCREEN_H;
-    if (!s_rot) {
-        memcpy(out, px, N * sizeof(lv_color_t));
-    } else {
-        switch (s_rot) {
-            case 90:  // 90° CW
-                for (int j = 0; j < SCREEN_H; ++j)
-                    for (int i = 0; i < SCREEN_W; ++i)
-                        out[i * SCREEN_H + (SCREEN_H - 1 - j)] = px[j * SCREEN_W + i];
-                break;
-            case 180:  // 180°
-                for (int k = 0; k < N; ++k) out[k] = px[N - 1 - k];
-                break;
-            case 270:  // 270° CW
-                for (int j = 0; j < SCREEN_H; ++j)
-                    for (int i = 0; i < SCREEN_W; ++i)
-                        out[(SCREEN_W - 1 - i) * SCREEN_H + j] = px[j * SCREEN_W + i];
-                break;
-        }
-        if (s_rot % 90) {
-            // Inverse-map output pixels around the centre; round panel corners are black.
-            // A whole frame arrives in one flush, so keep sampling the touch panel while it is
-            // rotated, or a quick tap that starts and ends in here never reaches LVGL.
-            const float c = (SCREEN_W - 1) * 0.5f;
-            for (int y = 0; y < SCREEN_H; ++y) {
-                if ((y & 15) == 0) touch_sample(false);
-                for (int x = 0; x < SCREEN_W; ++x) {
-                    const float dx = x - c, dy = y - c;
-                    const int sx = (int)lroundf(c + s_rotCos * dx + s_rotSin * dy);
-                    const int sy = (int)lroundf(c - s_rotSin * dx + s_rotCos * dy);
-                    out[y * SCREEN_W + x].full =
-                        sx >= 0 && sx < SCREEN_W && sy >= 0 && sy < SCREEN_H
-                        ? px[sy * SCREEN_W + sx].full : 0;
-                }
-            }
+    // Inverse-map output pixels around the centre; round panel corners are black.
+    // A whole frame arrives in one flush, so keep sampling the touch panel while it is
+    // rotated, or a quick tap that starts and ends in here never reaches LVGL.
+    const float c = (SCREEN_W - 1) * 0.5f;
+    for (int y = 0; y < SCREEN_H; ++y) {
+        if ((y & 15) == 0) touch_sample(false);
+        for (int x = 0; x < SCREEN_W; ++x) {
+            const float dx = x - c, dy = y - c;
+            const int sx = (int)lroundf(c + s_rotCos * dx + s_rotSin * dy);
+            const int sy = (int)lroundf(c - s_rotSin * dx + s_rotCos * dy);
+            out[y * SCREEN_W + x].full =
+                sx >= 0 && sx < SCREEN_W && sy >= 0 && sy < SCREEN_H
+                ? px[sy * SCREEN_W + sx].full : 0;
         }
     }
     // Keep the compositor's copy, and blend the overlays in, as draw_block does for an area.
