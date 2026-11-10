@@ -9,15 +9,17 @@
 #define TCA_OUTPUT_REG  0x01   // output latch
 #define TCA_CONFIG_REG  0x03   // direction: 1 = input, 0 = output
 
-static uint8_t read_reg(uint8_t reg) {
+// False on a failed read. A read-modify-write must then skip its write: writing back a 0
+// makes every pin an output (direction) or drives every other output low (latch).
+static bool read_reg(uint8_t reg, uint8_t *val) {
     Wire.beginTransmission(TCA9554_ADDR);
     Wire.write(reg);
-    if (Wire.endTransmission() != 0) {
+    if (Wire.endTransmission() != 0 || Wire.requestFrom((uint8_t)TCA9554_ADDR, (uint8_t)1) != 1) {
         Serial.println("[tca9554] read: no ACK");
-        return 0;
+        return false;
     }
-    Wire.requestFrom((uint8_t)TCA9554_ADDR, (uint8_t)1);
-    return Wire.available() ? Wire.read() : 0;
+    *val = Wire.read();
+    return true;
 }
 
 static void write_reg(uint8_t reg, uint8_t val) {
@@ -28,13 +30,16 @@ static void write_reg(uint8_t reg, uint8_t val) {
 }
 
 void tca9554_init() {
-    write_reg(TCA_CONFIG_REG, read_reg(TCA_CONFIG_REG) & (uint8_t)~TCA9554_OUTPUTS);
+    uint8_t cfg;
+    if (!read_reg(TCA_CONFIG_REG, &cfg)) return;
+    write_reg(TCA_CONFIG_REG, cfg & (uint8_t)~TCA9554_OUTPUTS);
     Serial.printf("[tca9554] init @0x%02X (outputs 0x%02X)\n", TCA9554_ADDR, TCA9554_OUTPUTS);
 }
 
 void tca9554_set(uint8_t pin, uint8_t level) {
     if (pin < 1 || pin > 8) return;
-    uint8_t out = read_reg(TCA_OUTPUT_REG);
+    uint8_t out;
+    if (!read_reg(TCA_OUTPUT_REG, &out)) return;
     const uint8_t mask = (uint8_t)(1 << (pin - 1));
     if (level) out |= mask;
     else       out &= (uint8_t)~mask;
@@ -43,7 +48,9 @@ void tca9554_set(uint8_t pin, uint8_t level) {
 
 uint8_t tca9554_get(uint8_t pin) {
     if (pin < 1 || pin > 8) return 0;
-    return (read_reg(TCA_INPUT_REG) >> (pin - 1)) & 0x01;
+    uint8_t in = 0;
+    read_reg(TCA_INPUT_REG, &in);
+    return (in >> (pin - 1)) & 0x01;
 }
 
 #endif  // TCA9554_ADDR
