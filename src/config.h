@@ -114,6 +114,13 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define TOUCH_SAMPLE_MS         20
 #define TOUCH_NODATA_RELEASE_MS 100  // failed reads for this long while pressed count as a lift
 #define TOUCH_QUEUE_LEN         32   // samples held between two LVGL reads (a full frame adds ~10)
+// The plane card's X (ui.cpp): its tap area grows this much on every side, inside the card.
+// On a 1.43, taps aimed at the X landed up to 32 px below its centre (@h0verin, #57); 21
+// reaches 35 px below the centre of the normal-size X.
+#define UI_CARD_CLOSE_HIT       21
+// A tap this close outside the open card closes it instead of picking a plane (ui.cpp). On
+// that 1.43, 12 of the 13 taps that went off the card landed within 11 px of its edge.
+#define UI_CARD_CLOSE_MARGIN    12
 
 // ---------- ADS-B API (free, non-commercial) ----------
 // Providers are tried in this order; each is paced independently (see AdsbClient).

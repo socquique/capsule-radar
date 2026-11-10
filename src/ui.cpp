@@ -408,6 +408,17 @@ static void radar_presslost_cb(lv_event_t *e) {   // scroll stole the press: a s
     s_lpArmed = false;
 }
 
+// A tap just outside the open card closes it, even on a plane: a finger aimed at the X or the
+// card's edge often lands a few px past the card, and that tap picked a plane instead. A second
+// tap picks the plane. Only taps that reach the radar tile come here: the zoom button keeps its own.
+static bool near_open_card(const lv_point_t &p) {
+    if (!s_card || lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN)) return false;
+    lv_area_t a;
+    lv_obj_get_coords(s_card, &a);
+    const lv_coord_t m = UI_CARD_CLOSE_MARGIN;
+    return p.x >= a.x1 - m && p.x <= a.x2 + m && p.y >= a.y1 - m && p.y <= a.y2 + m;
+}
+
 static void radar_clicked_cb(lv_event_t *e) {
     (void)e;
     if (s_themeHeld) { s_themeHeld = false; return; }   // the lift after a theme hold is not a tap
@@ -415,7 +426,7 @@ static void radar_clicked_cb(lv_event_t *e) {
     if (!indev) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
-    radar::select(radar::hitTest(p.x, p.y));   // hit -> select; miss -> clear
+    radar::select(near_open_card(p) ? -1 : radar::hitTest(p.x, p.y));   // hit -> select; miss or next to the card -> clear
     refresh_card();
 }
 
@@ -888,6 +899,14 @@ static lv_obj_t *make_round_panel(lv_obj_t *parent) {
     return p;
 }
 
+// The X in the card's top-right corner: closes the card, as a tap on empty scope does. With
+// planes round the card, that tap often selected one of them instead.
+static void card_close_cb(lv_event_t *e) {
+    (void)e;
+    radar::select(-1);
+    refresh_card();
+}
+
 static void build_card(void) {
     s_card = lv_obj_create(s_tileRadar);
     lv_obj_remove_style_all(s_card);
@@ -927,6 +946,31 @@ static void build_card(void) {
     lv_obj_set_width(s_cardRoute, s_bigText ? 292 : 276);   // card 316/300 minus pad 12 x2
     lv_label_set_long_mode(s_cardRoute, LV_LABEL_LONG_DOT);
     lv_obj_align(s_cardRoute, LV_ALIGN_TOP_LEFT, 0, s_bigText ? 100 : 76);
+
+    // The X sits in the card's top-right corner, 4 px in from its edges (the content area
+    // starts 13 px in: 12 px padding plus the 1 px frame). A child of the card: it hides with
+    // it, and the card's sweep mask covers it.
+    // Its tap area grows by UI_CARD_CLOSE_HIT on every side; LVGL clips that to the card.
+    const lv_coord_t cs = s_bigText ? 32 : 28;
+    lv_obj_t *x = lv_obj_create(s_card);
+    lv_obj_remove_style_all(x);
+    lv_obj_set_size(x, cs, cs);
+    lv_obj_align(x, LV_ALIGN_TOP_RIGHT, 9, -9);
+    lv_obj_set_style_radius(x, 10, 0);                        // the card's 14 minus the 4 px inset
+    lv_obj_set_style_border_color(x, UI_GREEN, 0);            // the card's own frame
+    lv_obj_set_style_border_opa(x, 90, 0);
+    lv_obj_set_style_border_width(x, 1, 0);
+    lv_obj_set_style_bg_color(x, UI_GREEN, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(x, 60, LV_STATE_PRESSED);
+    lv_obj_add_flag(x, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(x, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN);   // a small drift must not swipe the view
+    lv_obj_set_ext_click_area(x, UI_CARD_CLOSE_HIT);
+    lv_obj_add_event_cb(x, card_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *xl = lv_label_create(x);
+    lv_label_set_text(xl, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(xl, F14(), 0);
+    lv_obj_set_style_text_color(xl, UI_SOFT, 0);
+    lv_obj_center(xl);
 
     // aircraft photo + credit, floating above the card (hidden until one loads)
     s_photo = lv_canvas_create(s_tileRadar);
