@@ -255,7 +255,7 @@ static void panel_push(int16_t x, int16_t y, uint16_t *pixels, uint16_t w, uint1
 #define FADE_SHIFT     3
 #define FADE_N         ((TRAIL_U >> FADE_SHIFT) + 2)
 #define COMP_ROWS      32                        // rows per push from the scratch buffer
-#define SWEEP_MASKS    4
+#define SWEEP_MASKS    5                         // ui_sweep_masks(): card, photo, credit, zoom button, hold hint
 static_assert(LV_COLOR_16_SWAP == 0, "compositor assumes native-order RGB565");
 
 struct Rect { int x1, y1, x2, y2; bool valid; };
