@@ -19,6 +19,12 @@ public:
         _gfx = gfx;
         _ui  = (uint16_t *)heap_caps_calloc((size_t)SCREEN_W * SCREEN_H, 2, MALLOC_CAP_SPIRAM);
         _out = (uint16_t *)heap_caps_malloc((size_t)PANEL_W * ROWS * 2, MALLOC_CAP_SPIRAM);
+        if (!_ui || !_out) {
+            heap_caps_free(_ui);
+            heap_caps_free(_out);
+            _ui = _out = nullptr;
+            return false;
+        }
         for (int i = 0; i < PANEL_W; ++i) {
             const float s = (i + 0.5f) * SCREEN_W / PANEL_W - 0.5f;
             int s0 = (int)floorf(s);
@@ -26,7 +32,7 @@ public:
             _src0[i] = (uint16_t)s0;
             _srcW[i] = (uint8_t)lroundf((s - s0) * 32.0f);
         }
-        return _ui && _out;
+        return true;
     }
 
     // Native-order RGB565 (LV_COLOR_16_SWAP 0), UI coordinates.
