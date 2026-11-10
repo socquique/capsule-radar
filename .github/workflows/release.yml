@@ -78,12 +78,25 @@ jobs:
           build esp32-s3-amoled-143 "-amoled143"
           build esp32-s3-lcd-21 "-lcd21"
 
-      - name: Verify sdkconfig IRAM flags (LCD-2.1)
+      - name: Verify LCD interrupt configuration (LCD-2.1)
         run: |
           SDK=.pio/build/esp32-s3-lcd-21/config/sdkconfig.h
-          for flag in LCD_RGB_ISR_IRAM_SAFE GDMA_ISR_IRAM_SAFE GDMA_CTRL_FUNC_IN_IRAM; do
+          # Same check as build.yml (#54). The bounce-buffer refill reads the PSRAM framebuffer,
+          # so these ISRs must not be IRAM-safe: they are held off during flash operations.
+          for flag in LCD_RGB_ISR_IRAM_SAFE GDMA_ISR_IRAM_SAFE; do
+            if grep -q "^#define CONFIG_${flag} " "$SDK"; then
+              echo "CONFIG_${flag} must stay off (bounce-buffer refill reads PSRAM)" >&2
+              exit 1
+            fi
+          done
+          for flag in GDMA_CTRL_FUNC_IN_IRAM SPIRAM_TRY_ALLOCATE_WIFI_LWIP; do
             grep -qx "#define CONFIG_${flag} 1" "$SDK"
           done
+          # RESTART_IN_VSYNC must stay off: with it, a lost bounce-buffer EOF puts the refill out of step for good (IDF 5.3.2).
+          if grep -q "^#define CONFIG_LCD_RGB_RESTART_IN_VSYNC " "$SDK"; then
+            echo "CONFIG_LCD_RGB_RESTART_IN_VSYNC must stay off" >&2
+            exit 1
+          fi
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -111,8 +124,7 @@ jobs:
 
             **Which file?** Unsuffixed files are for the reference **ESP32-S3-Touch-AMOLED-1.75**.
             Files with `amoled143` in the name are for the **ESP32-S3-Touch-AMOLED-1.43**.
-            Files with `lcd21` in the name are for the **ESP32-S3-Touch-LCD-2.1** (experimental:
-            the picture can shift sideways at times, see #49).
+            Files with `lcd21` in the name are for the **ESP32-S3-Touch-LCD-2.1** (experimental).
             The boards have completely different pin maps — the wrong image gives a
             black screen, so check your board before flashing. (The browser flasher
             currently supports the AMOLED boards.)

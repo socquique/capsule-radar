@@ -232,7 +232,7 @@ static void refresh_card(void) {
 }
 
 // --------------------------------------------------------------------- input
-static bool s_longPressed = false;
+static bool s_themeHeld = false;   // this press reached the theme hold: its lift is not a tap
 static int s_rangeIdx = -1;
 static float s_rangeKm = RANGE_KM_DEFAULT;   // current display range (km), for the stats view
 static void (*s_rangeCb)(float) = nullptr;
@@ -353,61 +353,89 @@ void ui_set_range_km(float km) {
     s_rangeIdx = best;
 }
 
-// Long-press cycles the visual theme — but only if the finger never drags: cycling at
-// LONG_PRESSED time meant a press that turned into a view swipe changed the theme too.
-// Arm on long press, cycle on release, cancel on any drag/scroll.
-static bool s_lpArmed = false;      // long-press timer passed, finger still down
+// A still hold on the radar cycles the visual theme, on lift. When UI_THEME_HOLD_MS have
+// passed, a hint says "Lift to change theme"; moving the finger then cancels. Cycling on lift
+// (not when the time passes) keeps a press that turns into a swipe from changing the theme.
+// LVGL's own long press (400 ms) is not used: firm taps reached it, so tapping off a plane
+// card with a half-second press changed the theme and left the card open.
+static bool s_lpArmed = false;      // hold time passed, finger still down and still
 static bool s_lpMoved = false;      // finger travelled past the drag threshold since the press
 static lv_point_t s_lpOrigin;
+static uint32_t s_lpT0 = 0;         // when the press began (LVGL tick)
+static lv_obj_t *s_holdHint = nullptr;   // "Lift to change theme", shown while a hold is armed
 // Finger travel that counts as a drag. 10 px (LVGL's scroll limit) is under 1 mm on these
 // panels, less than a still fingertip drifts: on a 1.43, 3 of 15 holds were cancelled at
 // 12-14 px (@h0verin, #36). A real swipe across tiles still cancels through PRESS_LOST.
 #define LP_MOVE_PX 25
 
+static void hold_hint_show(bool on) {
+    if (!s_holdHint) return;
+    if (on) lv_obj_clear_flag(s_holdHint, LV_OBJ_FLAG_HIDDEN);
+    else    lv_obj_add_flag(s_holdHint, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void radar_press_cb(lv_event_t *e) {
-    s_longPressed = false;
+    s_themeHeld = false;
     s_lpArmed = false;
     s_lpMoved = false;
+    s_lpT0 = lv_tick_get();
     lv_indev_t *indev = lv_event_get_indev(e);
     if (indev) lv_indev_get_point(indev, &s_lpOrigin);
 }
 
-static void radar_pressing_cb(lv_event_t *e) {   // any real finger travel cancels the theme cycle
+static void radar_pressing_cb(lv_event_t *e) {
     if (s_lpMoved) return;
     lv_indev_t *indev = lv_event_get_indev(e);
     if (!indev) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
     const long dx = (long)p.x - s_lpOrigin.x, dy = (long)p.y - s_lpOrigin.y;
-    if (dx * dx + dy * dy > (long)LP_MOVE_PX * LP_MOVE_PX) s_lpMoved = true;
+    if (dx * dx + dy * dy > (long)LP_MOVE_PX * LP_MOVE_PX) {   // a drag: no theme change
+        s_lpMoved = true;
+        if (s_lpArmed) { s_lpArmed = false; hold_hint_show(false); }
+        return;
+    }
+    if (!s_lpArmed && lv_tick_elaps(s_lpT0) >= UI_THEME_HOLD_MS) {
+        s_lpArmed = true;
+        s_themeHeld = true;
+        hold_hint_show(true);
+    }
 }
 
-static void radar_longpress_cb(lv_event_t *e) {   // hold passed: arm, act on release
+static void radar_release_cb(lv_event_t *e) {   // still finger lifted after the hold -> next theme
     (void)e;
-    if (s_lpMoved) return;
-    s_lpArmed = true;
-    s_longPressed = true;   // the release after a hold is not a tap
-}
-
-static void radar_release_cb(lv_event_t *e) {   // still finger lifted -> cycle the theme
-    (void)e;
-    if (s_lpArmed && !s_lpMoved) radar::cycleTheme();
+    if (s_lpArmed && !s_lpMoved) {
+        hold_hint_show(false);
+        radar::cycleTheme();
+    }
     s_lpArmed = false;
 }
 
 static void radar_presslost_cb(lv_event_t *e) {   // scroll stole the press: a swipe, not a hold
     (void)e;
+    if (s_lpArmed) hold_hint_show(false);
     s_lpArmed = false;
+}
+
+// A tap just outside the open card closes it, even on a plane: a finger aimed at the X or the
+// card's edge often lands a few px past the card, and that tap picked a plane instead. A second
+// tap picks the plane. Only taps that reach the radar tile come here: the zoom button keeps its own.
+static bool near_open_card(const lv_point_t &p) {
+    if (!s_card || lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN)) return false;
+    lv_area_t a;
+    lv_obj_get_coords(s_card, &a);
+    const lv_coord_t m = UI_CARD_CLOSE_MARGIN;
+    return p.x >= a.x1 - m && p.x <= a.x2 + m && p.y >= a.y1 - m && p.y <= a.y2 + m;
 }
 
 static void radar_clicked_cb(lv_event_t *e) {
     (void)e;
-    if (s_longPressed) { s_longPressed = false; return; }   // ignore the click after a long-press
+    if (s_themeHeld) { s_themeHeld = false; return; }   // the lift after a theme hold is not a tap
     lv_indev_t *indev = lv_indev_get_act();
     if (!indev) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
-    radar::select(radar::hitTest(p.x, p.y));   // hit -> select; miss -> clear
+    radar::select(near_open_card(p) ? -1 : radar::hitTest(p.x, p.y));   // hit -> select; miss or next to the card -> clear
     refresh_card();
 }
 
@@ -821,7 +849,7 @@ bool ui_sweep_visible(void) {
 }
 
 int ui_sweep_masks(int16_t out[][5], int max) {
-    lv_obj_t *objs[4] = { s_card, s_photo, s_photoCredit, s_zoomBtn };   // detail card, its photo, range button
+    lv_obj_t *objs[5] = { s_card, s_photo, s_photoCredit, s_zoomBtn, s_holdHint };   // detail card, its photo, range button, hold hint
     int n = 0;
     for (lv_obj_t *o : objs) {
         if (n >= max || !o || lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) continue;
@@ -888,6 +916,14 @@ static lv_obj_t *make_round_panel(lv_obj_t *parent) {
     return p;
 }
 
+// The X in the card's top-right corner: closes the card, as a tap on empty scope does. With
+// planes round the card, that tap often selected one of them instead.
+static void card_close_cb(lv_event_t *e) {
+    (void)e;
+    radar::select(-1);
+    refresh_card();
+}
+
 static void build_card(void) {
     s_card = lv_obj_create(s_tileRadar);
     lv_obj_remove_style_all(s_card);
@@ -927,6 +963,31 @@ static void build_card(void) {
     lv_obj_set_width(s_cardRoute, s_bigText ? 292 : 276);   // card 316/300 minus pad 12 x2
     lv_label_set_long_mode(s_cardRoute, LV_LABEL_LONG_DOT);
     lv_obj_align(s_cardRoute, LV_ALIGN_TOP_LEFT, 0, s_bigText ? 100 : 76);
+
+    // The X sits in the card's top-right corner, 4 px in from its edges (the content area
+    // starts 13 px in: 12 px padding plus the 1 px frame). A child of the card: it hides with
+    // it, and the card's sweep mask covers it.
+    // Its tap area grows by UI_CARD_CLOSE_HIT on every side; LVGL clips that to the card.
+    const lv_coord_t cs = s_bigText ? 32 : 28;
+    lv_obj_t *x = lv_obj_create(s_card);
+    lv_obj_remove_style_all(x);
+    lv_obj_set_size(x, cs, cs);
+    lv_obj_align(x, LV_ALIGN_TOP_RIGHT, 9, -9);
+    lv_obj_set_style_radius(x, 10, 0);                        // the card's 14 minus the 4 px inset
+    lv_obj_set_style_border_color(x, UI_GREEN, 0);            // the card's own frame
+    lv_obj_set_style_border_opa(x, 90, 0);
+    lv_obj_set_style_border_width(x, 1, 0);
+    lv_obj_set_style_bg_color(x, UI_GREEN, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(x, 60, LV_STATE_PRESSED);
+    lv_obj_add_flag(x, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(x, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN);   // a small drift must not swipe the view
+    lv_obj_set_ext_click_area(x, UI_CARD_CLOSE_HIT);
+    lv_obj_add_event_cb(x, card_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *xl = lv_label_create(x);
+    lv_label_set_text(xl, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(xl, F14(), 0);
+    lv_obj_set_style_text_color(xl, UI_SOFT, 0);
+    lv_obj_center(xl);
 
     // aircraft photo + credit, floating above the card (hidden until one loads)
     s_photo = lv_canvas_create(s_tileRadar);
@@ -1042,7 +1103,6 @@ void ui_create(void) {
     lv_obj_add_event_cb(s_tileRadar, radar_clicked_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_press_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_pressing_cb, LV_EVENT_PRESSING, NULL);
-    lv_obj_add_event_cb(s_tileRadar, radar_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_release_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_presslost_cb, LV_EVENT_PRESS_LOST, NULL);
     build_card();
@@ -1114,6 +1174,23 @@ void ui_create(void) {
     lv_obj_set_style_text_opa(s_hudDate, 140, 0);
     lv_label_set_text(s_hudDate, "");
     lv_obj_align(s_hudDate, LV_ALIGN_TOP_MID, 0, 70);
+
+    // The theme hold's hint (radar_pressing_cb), styled like the zoom button and centred like
+    // the detail card. Opaque: while it shows, it sits over the middle of an open card.
+    s_holdHint = lv_label_create(s_tileRadar);
+    lv_label_set_text(s_holdHint, "Lift to change theme");
+    lv_obj_set_style_text_font(s_holdHint, F14(), 0);
+    lv_obj_set_style_text_color(s_holdHint, UI_GREEN, 0);
+    lv_obj_set_style_bg_color(s_holdHint, UI_PANEL, 0);
+    lv_obj_set_style_bg_opa(s_holdHint, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_holdHint, UI_GREEN, 0);
+    lv_obj_set_style_border_width(s_holdHint, 1, 0);
+    lv_obj_set_style_border_opa(s_holdHint, 170, 0);
+    lv_obj_set_style_radius(s_holdHint, 18, 0);
+    lv_obj_set_style_pad_hor(s_holdHint, 18, 0);
+    lv_obj_set_style_pad_ver(s_holdHint, 13, 0);
+    lv_obj_align(s_holdHint, LV_ALIGN_CENTER, 0, s_bigText ? 56 : 66);
+    lv_obj_add_flag(s_holdHint, LV_OBJ_FLAG_HIDDEN);
 
     // idle clock: a transparent layer above everything takes the touch that wakes the radar
     s_clockCatcher = lv_obj_create(lv_layer_top());

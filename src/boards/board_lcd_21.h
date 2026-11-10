@@ -57,9 +57,9 @@
 
 
 // Vendor RGB bus and timings (12 MHz pixel clock for PSRAM DMA headroom).
-#define RGB_PCLK_HZ   (12 * 1000 * 1000)   // 12 MHz (~44 Hz). Lower than the demo's 16 MHz so the
-                                            // direct-from-PSRAM DMA keeps up without a bounce buffer
-                                            // (no drift). Drop to 10 MHz if any drift remains.
+#define RGB_PCLK_HZ   (12 * 1000 * 1000)   // 12 MHz (~44 Hz). Lower than the demo's 16 MHz: gives the
+                                            // bounce-buffer refill (display_st7701.cpp) ~0.46 ms per
+                                            // 10 lines, slack for short flash ops that hold it off.
 #define RGB_HSYNC     38
 #define RGB_VSYNC     39
 #define RGB_DE        40

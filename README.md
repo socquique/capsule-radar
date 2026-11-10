@@ -30,11 +30,11 @@ A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Touch-AMOLED-1.75**
 ## Features
 
 - **Live traffic** from [airplanes.live](https://airplanes.live), [adsb.fi](https://adsb.fi/) and [adsb.lol](https://adsb.lol) (free, non-commercial), updated every couple of seconds. Each provider is paced independently, so one refusing or rate-limiting does not stop the feed. Memory-safe streaming parser with a hard aircraft cap. *Note: airplanes.live is now [contributor-only](https://airplanes.live/get-started/) — if you run one of their feeders, your radar uses their API automatically from the same network (no keys, nothing to configure); otherwise it quietly falls back to adsb.fi / adsb.lol.*
-- **Four themes** (long-press the screen to cycle, or pick on the web; remembered across reboots):
+- **Four themes** (hold the radar still for 1.5 s, then lift, to cycle; or pick on the web; remembered across reboots):
   - **Phosphor** — green-on-black radar scope: rings, animated sweep, aircraft glyphs rotated by heading and color-coded by altitude, fading trails, emergency halo.
   - **Orb** — green gradient + grid scope: the 7 nearest aircraft as yellow orbs emitting waves, off-range traffic as edge arrows pointing its way, orange target rings.
   - **Amber CRT** and **Military** — the same scope retinted (warm amber / night-vision green).
-- **Touch** (CST9217): tap an aircraft → detail card (callsign, type, altitude, vertical speed, ground speed, distance, ground track (HDG), squawk, and **origin → destination** looked up from adsbdb, cached in NVS). The on-screen zoom button cycles the zoom range (10–100 km; the web page goes to 150 km). Swipe between **Radar / List / Stats** (circular layouts).
+- **Touch** (CST9217): tap an aircraft → detail card (callsign, type, altitude, vertical speed, ground speed, distance, ground track (HDG), squawk, and **origin → destination** looked up from adsbdb, cached in NVS); the X in its corner, a tap just outside the card, or a tap on empty scope closes it. The on-screen zoom button cycles the zoom range (10–100 km; the web page goes to 150 km). Swipe between **Radar / List / Stats** (circular layouts).
 - **Boot splash** + **alert pings** (ES8311 speaker): a soft ping when a new aircraft enters range, an urgent double-beep for emergency/military — volume & mute on the web page.
 - **Smooth motion**: aircraft glyphs glide between polls (interpolated) instead of jumping, using cheap partial redraws.
 - **Top HUD**: WiFi status (amber if the data feed is failing), in-range aircraft count, NTP/RTC clock, **battery %** (charging bolt, red when low), and the date. The Stats view footer shows how to reach the config page (`capsuleradar.local` + IP).
@@ -65,9 +65,16 @@ Pin maps live in [`src/boards/`](src/boards/), one header per board, selected by
 
 ### Waveshare ESP32-S3-Touch-LCD-2.1 (experimental)
 
-Contributed by @alexzogh in #45. **Experimental:** touch, WiFi, the feed and web updates work, but
-the picture can shift sideways now and then, more during a web update
-([#49](https://github.com/socquique/capsule-radar/issues/49)).
+Contributed by @alexzogh in #45. **Experimental:** touch, WiFi, the feed and web updates work.
+Since 1.7.0 the panel streams through bounce buffers with a real page flip, which fixed the
+sideways picture shift ([#49](https://github.com/socquique/capsule-radar/issues/49)) and the
+tearing (#54).
+
+**Built the 2.1 locally before 1.7.0?** Settings already in the generated
+`sdkconfig.esp32-s3-lcd-21` win over `custom_sdkconfig` in `platformio.ini`, so delete that
+file, build any AMOLED board once (e.g. `pio run -e esp32-s3-amoled-175`, which puts back the
+stock framework libraries), then build the 2.1 again. Otherwise the build succeeds but keeps
+the old panel settings. Fresh clones and CI are not affected.
 
 The 2.1-inch board uses a 480×480 ST7701 RGB IPS panel, CST820 touch, and a
 TCA9554 GPIO expander. Its pin map and timings live in `src/boards/board_lcd_21.h`.

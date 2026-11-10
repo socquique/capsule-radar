@@ -1,7 +1,7 @@
 #pragma once
 // Capsule Radar — build & user configuration.
 
-#define FW_VERSION "1.6.0-tcas.15"   // TCAS beta branch; bump on release
+#define FW_VERSION "1.7.0-tcas.16"   // TCAS beta branch; bump on release
 
 // ---------- Home location (default: Dénia, Spain) ----------
 // Overridable at runtime via the captive portal (stored in NVS).
@@ -107,6 +107,9 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define CLOCK_MTICK_OPA       80
 
 // ---------- Touch ----------
+// A still hold on the radar this long cycles the theme, on lift (ui.cpp). LVGL's 400 ms long
+// press caught firm taps: tapping off a plane card with a half-second press changed the theme.
+#define UI_THEME_HOLD_MS        1500
 // LVGL reads the touch panel only between frames, and a swipe redraws the whole screen on
 // every frame (~150-200 ms on the device). display.cpp also samples the panel between the
 // flush strips of a frame and replays the samples to LVGL in order (touch_queue.h).
@@ -116,6 +119,13 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define TOUCH_SAMPLE_MS         20
 #define TOUCH_NODATA_RELEASE_MS 100  // failed reads for this long while pressed count as a lift
 #define TOUCH_QUEUE_LEN         32   // samples held between two LVGL reads (a full frame adds ~10)
+// The plane card's X (ui.cpp): its tap area grows this much on every side, inside the card.
+// On a 1.43, taps aimed at the X landed up to 32 px below its centre (@h0verin, #57); 21
+// reaches 35 px below the centre of the normal-size X.
+#define UI_CARD_CLOSE_HIT       21
+// A tap this close outside the open card closes it instead of picking a plane (ui.cpp). On
+// that 1.43, 12 of the 13 taps that went off the card landed within 11 px of its edge.
+#define UI_CARD_CLOSE_MARGIN    12
 
 // ---------- ADS-B API (free, non-commercial) ----------
 // Providers are tried in this order; each is paced independently (see AdsbClient).
