@@ -111,8 +111,7 @@ jobs:
 
             **Which file?** Unsuffixed files are for the reference **ESP32-S3-Touch-AMOLED-1.75**.
             Files with `amoled143` in the name are for the **ESP32-S3-Touch-AMOLED-1.43**.
-            Files with `lcd21` in the name are for the **ESP32-S3-Touch-LCD-2.1** (experimental:
-            the picture can shift sideways at times, see #49).
+            Files with `lcd21` in the name are for the **ESP32-S3-Touch-LCD-2.1** (experimental).
             The boards have completely different pin maps — the wrong image gives a
             black screen, so check your board before flashing. (The browser flasher
             currently supports the AMOLED boards.)

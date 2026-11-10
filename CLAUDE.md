@@ -31,7 +31,8 @@ Arduino_GFX), CST820 touch, TCA9554 expander, no PMIC or audio. Pins in
 `src/boards/board_lcd_21.h`; its display glue is `src/display_st7701.cpp`, a separate copy of
 `display.cpp`'s API, so a change to `display.cpp` (touch queue, brightness, sweep) may need
 porting there. Build with `-e esp32-s3-lcd-21`: `custom_sdkconfig` rebuilds ESP-IDF, so the
-first build is slow. Known issue: the picture shifts sideways (#49).
+first build is slow. The sideways shift (#49) was fixed in #54 (bounce buffers + page flip);
+after changing `custom_sdkconfig`, delete `sdkconfig.esp32-s3-lcd-21` or the old values stick.
 
 ## Stack decision
 **PlatformIO + Arduino framework.** Libraries:

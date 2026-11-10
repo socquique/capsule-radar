@@ -65,9 +65,16 @@ Pin maps live in [`src/boards/`](src/boards/), one header per board, selected by
 
 ### Waveshare ESP32-S3-Touch-LCD-2.1 (experimental)
 
-Contributed by @alexzogh in #45. **Experimental:** touch, WiFi, the feed and web updates work, but
-the picture can shift sideways now and then, more during a web update
-([#49](https://github.com/socquique/capsule-radar/issues/49)).
+Contributed by @alexzogh in #45. **Experimental:** touch, WiFi, the feed and web updates work.
+Since 1.7.0 the panel streams through bounce buffers with a real page flip, which fixed the
+sideways picture shift ([#49](https://github.com/socquique/capsule-radar/issues/49)) and the
+tearing (#54).
+
+**Built the 2.1 locally before 1.7.0?** Settings already in the generated
+`sdkconfig.esp32-s3-lcd-21` win over `custom_sdkconfig` in `platformio.ini`, so delete that
+file, build any AMOLED board once (e.g. `pio run -e esp32-s3-amoled-175`, which puts back the
+stock framework libraries), then build the 2.1 again. Otherwise the build succeeds but keeps
+the old panel settings. Fresh clones and CI are not affected.
 
 The 2.1-inch board uses a 480×480 ST7701 RGB IPS panel, CST820 touch, and a
 TCA9554 GPIO expander. Its pin map and timings live in `src/boards/board_lcd_21.h`.
