@@ -1,9 +1,10 @@
 # Hardware
 
-Capsule Radar supports two Waveshare round-AMOLED boards and the round LCD-1.85C V2.
-The AMOLED boards use the same SoC and the same 466×466 CO5300 panel, but their **pin
-maps have nothing in common** — flashing one board's image onto another gives a black
-screen and a silent I2C bus.
+Capsule Radar supports four Waveshare round boards: the AMOLED-1.75 and AMOLED-1.43, and
+the LCD-2.1 and LCD-1.85C V2 (both experimental). All four use the same ESP32-S3 SoC, but
+their **pin maps have nothing in common** — flashing one board's image onto another gives
+a black screen and a silent I2C bus. The two AMOLED boards share the same 466×466 CO5300
+panel. The LCD-2.1 is described in the [README](../README.md); the others have sections below.
 
 Pin maps live one-per-board in [`../src/boards/`](../src/boards/) and are selected by a
 build flag (see [`../src/config.h`](../src/config.h)):
@@ -12,6 +13,7 @@ build flag (see [`../src/config.h`](../src/config.h)):
 |---|---|---|---|
 | ESP32-S3-Touch-AMOLED-1.75 (reference) | `esp32-s3-amoled-175` | *(default)* | `board_amoled_175.h` |
 | ESP32-S3-Touch-AMOLED-1.43 | `esp32-s3-amoled-143` | `-DBOARD_AMOLED_143` | `board_amoled_143.h` |
+| ESP32-S3-Touch-LCD-2.1 | `esp32-s3-lcd-21` | `-DBOARD_LCD21` | `board_lcd_21.h` |
 | ESP32-S3-Touch-LCD-1.85C V2 | `esp32-s3-lcd-185c-v2` | `-DBOARD_LCD185C_V2` | `board_lcd_185c_v2.h` |
 
 ---
