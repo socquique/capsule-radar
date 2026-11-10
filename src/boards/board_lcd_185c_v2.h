@@ -18,6 +18,7 @@
 #define PANEL_H             360
 
 // ---------- Panel (ST77916, QSPI) ----------
+#define PANEL_DRIVER_ST77916 1             // panel_st77916.cpp instead of the CO5300 path in display.cpp
 #define PIN_LCD_CS          21
 #define PIN_LCD_SCLK        40             // QSPI PCLK
 #define PIN_LCD_D0          46

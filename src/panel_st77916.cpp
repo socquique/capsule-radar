@@ -3,7 +3,7 @@
 // https://github.com/Adolanium/hermes-gadget-sdk, firmware/esp32/main/port_display.cpp),
 // which follows Waveshare's factory demo. The init tables are in st77916_ws185_init.h.
 #include "config.h"
-#if defined(BOARD_LCD185C_V2)
+#if PANEL_DRIVER_ST77916
 #include "panel_st77916.h"
 #include "st77916_ws185_init.h"
 #include "tca9554.h"
@@ -78,4 +78,4 @@ void st77916_set_brightness(uint8_t v) {
     ledcWrite(PIN_LCD_BL, (uint32_t)v * ((1u << LCD_BL_PWM_BITS) - 1) / 255u);
 }
 
-#endif  // BOARD_LCD185C_V2
+#endif  // PANEL_DRIVER_ST77916

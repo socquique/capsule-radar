@@ -137,7 +137,7 @@ order; and an on-screen dot followed a fingertip.
    core board variant** — never guess them.
 2. Add an `[env:…]` in `platformio.ini` that `extends = amoled_common` and sets `-DBOARD_…`.
 3. Set `BOARD_HAS_PMIC` / `BOARD_HAS_AUDIO` / `BOARD_HAS_IMU` /
-   `BOARD_HAS_GPS` / `TOUCH_DRIVER_…` for what is actually fitted;
+   `BOARD_HAS_GPS` / `TOUCH_DRIVER_…` / `PANEL_DRIVER_ST77916` for what is actually fitted;
    add a touch driver alongside `touch_cst9217.cpp` / `touch_ft3168.cpp` if needed.
 4. Confirm on hardware before committing: I2C scan, a full-panel test pattern for the gap,
    and a touch dot that lands under your fingertip.

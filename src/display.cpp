@@ -21,7 +21,7 @@
 #include <string.h>
 
 // --- Arduino_GFX panel -------------------------------------------------------
-#if defined(BOARD_LCD185C_V2)
+#if PANEL_DRIVER_ST77916
 #include "panel_st77916.h"
 static Arduino_GFX     *s_gfx = nullptr;   // brightness is the LEDC backlight, not a panel command
 #else
@@ -796,7 +796,7 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
 namespace display {
 
 bool begin() {
-#if defined(BOARD_LCD185C_V2)
+#if PANEL_DRIVER_ST77916
     Serial.println("[display] init ST77916 QSPI...");
     s_gfx = st77916_begin();
     if (!s_gfx) {
@@ -905,7 +905,7 @@ bool sweepAvailable() { return sweep_ready(); }
 float sweepAngleDeg() { return (float)(s_swPhase >> 8) * (360.0f / (float)ANG_UNITS); }
 
 void setBrightness(uint8_t v) {
-#if defined(BOARD_LCD185C_V2)
+#if PANEL_DRIVER_ST77916
     if (s_gfx) st77916_set_brightness(v);
 #else
     if (s_gfx) s_gfx->setBrightness(v);
