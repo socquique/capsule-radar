@@ -13,6 +13,39 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>   // v7
 #include <esp_heap_caps.h>
+#include "lwip/tcpip.h"
+#include "lwip/priv/tcp_priv.h"   // tcp_active_pcbs: lwIP has no public way to list connections
+
+// A provider that accepts the TCP connection and then says nothing (a TLS-inspecting
+// firewall, a captive portal, a lossy link) leaves something behind on every failed
+// request. HTTPClient closes the socket, lwIP sends a FIN with the unacknowledged
+// ClientHello still queued, and that FIN is never answered either. The socket is gone,
+// but lwIP keeps the connection in FIN_WAIT_1, retransmitting with exponential backoff
+// until TCP_MAXRTX gives up: about 39 minutes, holding its send buffers all along.
+// A ~3-minute stall at one try per 10 s fills lwIP's whole connection pool (16), and on
+// boards without lwIP buffers in PSRAM (the LCD 2.1) that is ~2 KB of internal RAM each,
+// at the point where TLS needs internal RAM to recover.
+//
+// Nothing can answer those FINs any more, so after a failed request reset every outgoing
+// HTTPS connection (remote port 443: feeds, route and photo lookups) that has been closed
+// by its owner (callback_arg cleared by the socket layer) and is still waiting for its FIN
+// to be acknowledged. We only close those once we are done with them, so nothing is lost.
+// The web server's own connections are left alone: a page's last bytes may still be in
+// flight when its socket closes.
+// SO_LINGER can't do this: HTTPClient closes inside connect() when TLS fails.
+static unsigned freeStalledConnections() {
+    struct tcp_pcb* stale[MEMP_NUM_TCP_PCB];
+    unsigned n = 0;
+    LOCK_TCPIP_CORE();
+    for (struct tcp_pcb* p = tcp_active_pcbs; p && n < MEMP_NUM_TCP_PCB; p = p->next) {
+        const bool closing = p->state == FIN_WAIT_1 || p->state == FIN_WAIT_2 ||
+                             p->state == CLOSING || p->state == LAST_ACK;
+        if (closing && p->callback_arg == NULL && p->remote_port == 443) stale[n++] = p;
+    }
+    for (unsigned i = 0; i < n; ++i) tcp_abort(stale[i]);   // unlinks; don't walk the list here
+    UNLOCK_TCPIP_CORE();
+    return n;
+}
 
 // Parse the JSON in PSRAM, not internal RAM. Otherwise the per-poll JSON alloc/free
 // churn fragments the internal heap and, after a while, mbedTLS can't find a large
@@ -202,7 +235,12 @@ bool AdsbClient::fetchFrom(int slot, std::vector<Aircraft>& out) {
                                   host, code, (unsigned)(gap / 1000));
             }
         }
-        http.end(); return false;
+        http.end();
+        if (code <= 0) {
+            const unsigned freed = freeStalledConnections();
+            if (freed) Serial.printf("[adsb] reset %u stalled connection%s\n", freed, freed == 1 ? "" : "s");
+        }
+        return false;
     }
 
     // Only keep the fields we use -> much smaller parsed document.
