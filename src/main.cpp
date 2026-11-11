@@ -1393,6 +1393,7 @@ void setup() {
 
 void loop() {
     display::loop();                // drive LVGL (render dirty areas + run timers)
+    audio_loop();                   // time the buzzer's beeps (boards with one)
     g_wm.process();                 // service the WiFi config portal (non-blocking)
     g_web.handleClient();           // serve the configuration web page
     if (g_useGps) gps_poll();       // pull NMEA from the LC76G (only when GPS auto-location is on)

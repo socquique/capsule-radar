@@ -27,7 +27,8 @@ Full detail in `docs/HARDWARE.md`.
 
 ### Third board (experimental): ESP32-S3-Touch-LCD-2.1
 Contributed by @alexzogh (#45). A 480x480 **ST7701 RGB** LCD driven through esp_lcd (no
-Arduino_GFX), CST820 touch, TCA9554 expander, no PMIC or audio. Pins in
+Arduino_GFX), CST820 touch, TCA9554 expander, no PMIC or audio codec (its buzzer on EXIO8 beeps the
+alerts, `BOARD_HAS_BUZZER`). Pins in
 `src/boards/board_lcd_21.h`; its display glue is `src/display_st7701.cpp`, a separate copy of
 `display.cpp`'s API, so a change to `display.cpp` (touch queue, brightness, sweep) may need
 porting there. Build with `-e esp32-s3-lcd-21`: `custom_sdkconfig` rebuilds ESP-IDF, so the

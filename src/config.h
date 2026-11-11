@@ -204,3 +204,8 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #ifndef ADSB_TASK_STACK_BYTES
 #define ADSB_TASK_STACK_BYTES 16384
 #endif
+
+// An on/off buzzer instead of a codec (the LCD 2.1): see audio.cpp.
+#ifndef BOARD_HAS_BUZZER
+#define BOARD_HAS_BUZZER 0
+#endif

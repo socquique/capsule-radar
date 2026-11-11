@@ -1,5 +1,7 @@
 #pragma once
 // ES8311 codec + speaker: short alert "pings". Device-only.
+// Boards with an on/off buzzer instead (BOARD_HAS_BUZZER, the LCD 2.1) beep the same cues:
+// no pitch or volume there, and volume 0 silences it like mute.
 //
 // Bus discipline: the ES8311 is configured over the shared I2C bus, so audio_begin()
 // MUST run on core 1 (setup), like the other I2C devices. Playback afterwards only
@@ -17,3 +19,4 @@ void audio_set_volume(int pct);     // 0..100 (software amplitude)
 void audio_set_muted(bool muted);
 void audio_play(AudioCue cue);      // non-blocking: signals the playback task
 void audio_selftest();              // ~2 s continuous tone for by-ear verification
+void audio_loop();                  // call from loop() (core 1): times a buzzer's beeps; no-op elsewhere

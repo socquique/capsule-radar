@@ -33,7 +33,7 @@
 #define TCA9554_ADDR        0x20
 #define EXIO_LCD_RST        1              // ST7701 reset   (EXIO1)
 #define EXIO_TP_RST         2              // CST820 reset   (EXIO2)
-#define EXIO_AUX            8              // vendor init holds buzzer/aux line low
+#define EXIO_AUX            8              // active buzzer (high = tone); vendor init holds it low
 #define EXIO_LCD_CS         3              // ST7701 3-wire SPI chip-select (EXIO3)
 
 // ---------- Touch (CST820 capacitive, I2C) ----------
@@ -45,6 +45,7 @@
 // ---------- Peripherals ----------
 #define BOARD_HAS_PMIC      0
 #define BOARD_HAS_AUDIO     0
+#define BOARD_HAS_BUZZER    1              // alert beeps on the EXIO_AUX buzzer (audio.cpp)
 #define TOUCH_DRIVER_CST820 1
 #define ADSB_TASK_STACK_BYTES 32768 // IDF-mode TLS needs more stack than precompiled Arduino
 

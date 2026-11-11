@@ -254,7 +254,70 @@ void audio_selftest() {   // ~2 s continuous tone, ignores mute, PA held on
     xQueueSend(s_queue, &c, 0);
 }
 
-#else   // !BOARD_HAS_AUDIO
+void audio_loop() {}
+
+#elif BOARD_HAS_BUZZER
+// An active buzzer on the TCA9554 expander (LCD 2.1: EXIO_AUX, high = tone). The expander
+// sits on the shared I2C bus, so the beeps are timed from loop() on core 1 (audio_loop),
+// never from another task. Each cue is a list of on/off durations; a slow loop (a whole
+// frame at an odd rotation, ~300 ms) can stretch a step, never cut one short.
+#include "tca9554.h"
+
+static bool s_ok = false;
+static volatile int  s_vol = 60;
+static volatile bool s_muted = false;
+static const uint16_t PAT_NEW[]   = { 160 };            // soft single beep
+static const uint16_t PAT_ALERT[] = { 80, 40, 80 };     // urgent double beep
+static const uint16_t PAT_TEST[]  = { 2000 };           // self-test tone
+static const uint16_t *s_pat = nullptr;                 // cue playing (nullptr = idle)
+static uint8_t  s_patLen = 0, s_step = 0;
+static bool     s_alertPlaying = false;
+static uint32_t s_stepStart = 0;
+
+static void buzzer(bool on) { tca9554_set(EXIO_AUX, on ? 1 : 0); }
+
+static void start(const uint16_t *pat, uint8_t len, bool alert) {
+    s_pat = pat; s_patLen = len; s_step = 0; s_alertPlaying = alert;
+    s_stepStart = millis();
+    buzzer(true);                                       // even steps sound, odd ones are gaps
+}
+
+bool audio_begin() {
+    buzzer(false);                                      // display::begin() already set up the expander
+    s_ok = true;
+    Serial.printf("[audio] buzzer on EXIO%d ready\n", EXIO_AUX);
+    return true;
+}
+bool audio_present()           { return s_ok; }
+void audio_set_volume(int pct) { s_vol = constrain(pct, 0, 100); }
+void audio_set_muted(bool m)   { s_muted = m; }
+
+void audio_play(AudioCue cue) {
+    if (!s_ok || s_muted || s_vol <= 0) return;
+    if (cue == AUDIO_ALERT) {
+        if (!s_alertPlaying) start(PAT_ALERT, 3, true); // an alert cuts a ping short
+    } else if (!s_pat) {
+        start(PAT_NEW, 1, false);                       // busy: drop the ping
+    }
+}
+
+void audio_selftest() {                                 // ignores mute, as on the codec boards
+    if (s_ok) start(PAT_TEST, 1, false);
+}
+
+void audio_loop() {
+    if (!s_pat || millis() - s_stepStart < s_pat[s_step]) return;
+    if (++s_step >= s_patLen) {
+        buzzer(false);
+        s_pat = nullptr;
+        s_alertPlaying = false;
+        return;
+    }
+    s_stepStart = millis();
+    buzzer((s_step & 1) == 0);
+}
+
+#else   // no codec, no buzzer
 
 bool audio_begin()              { Serial.println("[audio] no codec on this board"); return false; }
 bool audio_present()            { return false; }
@@ -262,5 +325,6 @@ void audio_set_volume(int)      {}
 void audio_set_muted(bool)      {}
 void audio_play(AudioCue)       {}
 void audio_selftest()           {}
+void audio_loop()               {}
 
-#endif  // BOARD_HAS_AUDIO
+#endif  // BOARD_HAS_AUDIO / BOARD_HAS_BUZZER
