@@ -13,12 +13,11 @@
 #include "airports.h"
 #include "clock_face.h"
 #include <lvgl.h>
+#include "src/draw/sw/lv_draw_sw.h"    // lv_draw_sw_ctx_t: the cache renderer's draw context
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <string>
-#include <map>
-#include <set>
 #include <vector>
 #include <deque>
 #include <algorithm>
@@ -63,7 +62,8 @@
 #define TRAIL_MAX         7
 #define TAP_RADIUS_PX     40    // generous finger-tap catch radius (picks the nearest glyph within it)
 #define FLOW_MAX          700
-#define FLOW_REDRAW_EVERY 80
+#define INV_MERGE_PAD_PX  24                 // partial invalidation: merge areas this close (px)
+#define INV_MAX_AREAS     12                 // past this many areas, take their union instead
 #define FLOW_OPA          55
 #define ORB_BLIPS      7
 #define ORB_ARROWS     8
@@ -75,11 +75,11 @@ static void      (*s_themeCb)(int) = nullptr;
 // scope "chrome" palette (rings/sweep/crosshair/labels) — retinted per theme
 static lv_color_t s_cRing = COL_GREEN, s_cLead = COL_LEAD, s_cInk = COL_INK, s_cSoft = COL_SOFT;
 static lv_obj_t  *s_parent   = nullptr;
-static lv_obj_t  *s_gridLayer = nullptr;
+static lv_obj_t  *s_bgImg    = nullptr;      // scope background cache (bottom of the tile)
+static lv_color_t *s_cacheBuf = nullptr;     // its RGB565 pixels, SCREEN_W x SCREEN_H
+static lv_img_dsc_t s_cacheDsc;              // wraps s_cacheBuf for lv_img
 static lv_obj_t  *s_sweep     = nullptr;
 static lv_obj_t  *s_acLayer   = nullptr;
-static lv_obj_t  *s_flowCanvas = nullptr;
-static lv_color_t *s_flowBuf  = nullptr;
 static lv_obj_t  *s_rose[4]   = {nullptr, nullptr, nullptr, nullptr};
 static lv_obj_t  *s_centerDot = nullptr;
 static lv_obj_t  *s_pulse     = nullptr;
@@ -146,7 +146,6 @@ static const ClockHands &clock_wall() {
 
 struct FlowSeg { lv_point_t a, b; uint16_t gen; };   // gen = the poll it was laid down on
 static std::deque<FlowSeg> s_flow;
-static int s_flowRedrawCtr = 0;
 static uint16_t s_flowGen = 0;        // ++ each update(); flow segments fade out after s_flowGenMax polls
 
 struct AcDraw {
@@ -164,10 +163,24 @@ struct AcDraw {
     bool       onGround;
     float      vsFpm, gsKt, distKm, bearingDeg;
     int        squawk;
-    std::vector<lv_point_t> trail;
+    const std::vector<lv_point_t> *trail;    // points into s_trailStore (null: no history)
 };
 static std::vector<AcDraw> s_acs;
-static std::map<std::string, std::vector<lv_point_t>> s_trails;
+// Per-aircraft trail history in fixed slots keyed by hex (n <= ADSB_MAX_AIRCRAFT: no map
+// nodes or std::string keys to build and free on every poll; the per-poll AcDraw list points
+// at a slot instead of copying the vector). Slots never move.
+struct TrailSlot { char hex[8]; bool used; std::vector<lv_point_t> pts; };
+static TrailSlot s_trailStore[ADSB_MAX_AIRCRAFT];
+static TrailSlot *trail_slot(const char *hex) {
+    TrailSlot *free = nullptr;
+    for (TrailSlot &t : s_trailStore) {
+        if (t.used) { if (strcmp(t.hex, hex) == 0) return &t; }
+        else if (!free) free = &t;
+    }
+    // Null only when every slot is held. At the feed cap, a contact that arrives in the poll
+    // another one leaves starts its trail a poll later (update() frees departed slots afterwards).
+    return free;
+}
 
 static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
@@ -240,38 +253,55 @@ static inline lv_point_t rot_pt(float px, float py, float deg, lv_coord_t ox, lv
     return p;
 }
 
-// =============================== flow map ====================================
-static void flow_draw_seg(const FlowSeg &s) {
-    if (!s_flowCanvas) return;
-    static uint32_t n = 0;
-    if ((++n & 31) == 0) comp_tick();            // keep the sweep moving through a full redraw
-    lv_draw_line_dsc_t d;
-    lv_draw_line_dsc_init(&d);
-    d.color = orb() ? ORB_FLOW : s_cRing;
-    d.width = 2;
-    d.opa = FLOW_OPA;
-    lv_point_t pts[2] = { s.a, s.b };
-    lv_canvas_draw_line(s_flowCanvas, pts, 2, &d);
+// ======================= scope background cache ==============================
+// Everything under the aircraft that does not move between polls -- the background (black;
+// Orb's gradient), the persistent flow tracks and the chrome the grid layer used to draw
+// (coastline, airports, rings, crosshair; Orb: grid, coastline, airports, centre triangle)
+// -- lives in ONE full-screen RGB565 buffer shown by s_bgImg at the bottom of the tile.
+// TRUE_COLOR at img_opa COVER passes LVGL's cover check, so any repaint of a scope area
+// starts at the image: the layers under it are skipped and the cache pixels are a straight
+// copy. cache_render_rect() renders any rectangle with LVGL's own software renderer aimed at
+// the buffer (the trick behind lv_canvas_draw_*), so re-rendering a rect (added or pruned
+// flow, dim change) is exact and repeatable.
+static void cache_bg_fill(lv_draw_ctx_t *d, const lv_area_t *clip) {
+    lv_draw_rect_dsc_t bg;
+    lv_draw_rect_dsc_init(&bg);
+    bg.bg_color = lv_color_black();          // the tileview's black, under the tile: the dim
+    bg.bg_opa = LV_OPA_COVER;                // gradient blends onto it, not onto the cache's
+    lv_draw_rect(d, &bg, clip);              // previous content (V blended over V stays V)
+    if (orb()) {                             // the radar tile's gradient, dimmed behind the
+        bg.bg_grad.dir = LV_GRAD_DIR_VER;    // clock exactly as the tile's bg_opa did
+        bg.bg_grad.stops[0].color = ORB_BG_TOP;
+        bg.bg_grad.stops[1].color = ORB_BG_BOT;
+        bg.bg_opa = s_dimOpa;
+        lv_draw_rect(d, &bg, clip);
+    }
 }
 
-static void flow_redraw_all(void) {
-    if (!s_flowCanvas || !s_flowBuf) return;
-    // Clear to fully transparent with one memset: all-zero bytes = black at alpha 0 in
-    // TRUE_COLOR_ALPHA. lv_canvas_fill_bg() sets each of the ~217k pixels through per-pixel
-    // helper calls, which took ~150 ms here and stalled the UI on every poll.
-    memset(s_flowBuf, 0, LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(SCREEN_W, SCREEN_H));
-    lv_obj_invalidate(s_flowCanvas);
-    for (const FlowSeg &s : s_flow) flow_draw_seg(s);
+// Flow segments whose 2 px anti-aliased line can touch the clip rect.
+static void cache_flow_draw(lv_draw_ctx_t *d, const lv_area_t *clip) {
+    lv_draw_line_dsc_t fl;
+    lv_draw_line_dsc_init(&fl);
+    fl.color = orb() ? ORB_FLOW : s_cRing;
+    fl.width = 2;
+    fl.opa = dim(FLOW_OPA);
+    uint32_t n = 0;
+    for (const FlowSeg &s : s_flow) {
+        if ((++n & 31) == 0) comp_tick();    // keep the sweep moving through long passes
+        if (LV_MAX(s.a.x, s.b.x) + 2 < clip->x1 || LV_MIN(s.a.x, s.b.x) - 2 > clip->x2 ||
+            LV_MAX(s.a.y, s.b.y) + 2 < clip->y1 || LV_MIN(s.a.y, s.b.y) - 2 > clip->y2) continue;
+        lv_point_t pts[2] = { s.a, s.b };
+        lv_draw_line(d, &fl, &pts[0], &pts[1]);
+    }
 }
 
-// =============================== grid ========================================
 // Ring and crosshair sizes were laid out for the AMOLED scope (outer ring 218 px); scale
 // them with the board's outer ring so the spacing stays even on other panels (rounded,
 // exact on the AMOLED boards).
 #define SCOPE_PX(px) ((lv_coord_t)(((px) * RADAR_R_OUTER_PX + 109) / 218))
 
-static void grid_draw_cb(lv_event_t *e) {
-    lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
+// The chrome the former grid layer drew, in the same z-order: coastline, airports, rings and crosshair.
+static void cache_chrome_draw(lv_draw_ctx_t *d, const lv_area_t *clip) {
     const lv_point_t c = { s_cx, s_cy };
 
     if (orb()) {
@@ -300,7 +330,7 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_color = lv_color_hex(0x8A4A00);
         td.border_width = 1;
         td.border_opa = dim(160);
-        coastline_draw(d, COAST_COLOR, dim(170), 2);    // landmass outline under the triangle
+        coastline_draw(d, COAST_COLOR, dim(170), 2, clip);   // landmass outline under the triangle
         if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, dim(150));
         lv_draw_polygon(d, &td, tri, 3);
         return;
@@ -308,7 +338,7 @@ static void grid_draw_cb(lv_event_t *e) {
 
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
-    coastline_draw(d, COAST_COLOR, dim(165), 2);
+    coastline_draw(d, COAST_COLOR, dim(165), 2, clip);
     if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, dim(150));
 
     // phosphor: concentric rings + crosshair
@@ -330,6 +360,56 @@ static void grid_draw_cb(lv_event_t *e) {
     lv_point_t v1 = { s_cx, (lv_coord_t)(s_cy - ch) }, v2 = { s_cx, (lv_coord_t)(s_cy + ch) };
     lv_draw_line(d, &ll, &h1, &h2);
     lv_draw_line(d, &ll, &v1, &v2);
+}
+
+// Render one rect of the cache (screen coordinates, clipped to the screen).
+static void cache_render_rect(const lv_area_t *rect) {
+    if (!s_cacheBuf) return;
+    lv_area_t clip;                                   // stays alive for the whole render
+    clip.x1 = LV_MAX(rect->x1, 0);
+    clip.y1 = LV_MAX(rect->y1, 0);
+    clip.x2 = LV_MIN(rect->x2, SCREEN_W - 1);
+    clip.y2 = LV_MIN(rect->y2, SCREEN_H - 1);
+    if (clip.x2 < clip.x1 || clip.y2 < clip.y1) return;
+
+    // A stand-in display aimed at the cache buffer, the way lv_canvas_draw_* does it
+    // (init_fake_disp): with no set_px_cb the software renderer takes the fast path and
+    // blends straight into s_cacheBuf. Static storage: this runs on the LVGL thread only.
+    static lv_disp_t fake;
+    static lv_disp_drv_t drv;
+    static lv_area_t buf_area = { 0, 0, SCREEN_W - 1, SCREEN_H - 1 };
+    static lv_draw_sw_ctx_t sw_ctx;
+    lv_memset_00(&fake, sizeof(fake));
+    fake.driver = &drv;
+    lv_disp_drv_init(&drv);                           // antialiasing on, like the real driver
+    drv.hor_res = SCREEN_W;
+    drv.ver_res = SCREEN_H;
+    drv.draw_ctx = (lv_draw_ctx_t *)&sw_ctx;
+    lv_draw_sw_init_ctx(&drv, &sw_ctx.base_draw);
+    sw_ctx.base_draw.clip_area = &clip;
+    sw_ctx.base_draw.buf_area = &buf_area;
+    sw_ctx.base_draw.buf = s_cacheBuf;
+
+    lv_disp_t *refr_ori = _lv_refr_get_disp_refreshing();
+    _lv_refr_set_disp_refreshing(&fake);
+    cache_bg_fill(&sw_ctx.base_draw, &clip);
+    comp_tick();
+    cache_flow_draw(&sw_ctx.base_draw, &clip);
+    comp_tick();
+    cache_chrome_draw(&sw_ctx.base_draw, &clip);
+    comp_tick();
+    _lv_refr_set_disp_refreshing(refr_ori);
+    lv_draw_sw_deinit_ctx(&drv, &sw_ctx.base_draw);
+}
+
+// Whole-cache re-render: init, theme / airports / trail-length / clock-stage change, and a
+// scope geometry change in update() -- the events that used to repaint the grid layer or
+// rebuild the flow canvas.
+static void cache_full_rerender(void) {
+    if (!s_cacheBuf || !s_bgImg) return;
+    const lv_area_t all = { 0, 0, SCREEN_W - 1, SCREEN_H - 1 };
+    cache_render_rect(&all);
+    lv_obj_invalidate(s_bgImg);
 }
 
 // =============================== sweep =======================================
@@ -398,6 +478,76 @@ static inline void area_union(lv_area_t &d, const lv_area_t &s) {
     d.x2 = LV_MAX(d.x2, s.x2); d.y2 = LV_MAX(d.y2, s.y2);
 }
 
+// ---- partial invalidation (update()) ----
+// Areas nearer than INV_MERGE_PAD_PX merge into one; past INV_MAX_AREAS the union is taken.
+// Keeps the pending-area count far under LVGL's LV_INV_BUF_SIZE (32), above which LVGL
+// repaints the whole screen anyway.
+static int inv_merge(lv_area_t *a, int n) {
+    if (n <= 1) return n;
+    for (;;) {
+        bool merged = false;
+        for (int i = 0; i < n && !merged; ++i) {
+            for (int j = i + 1; j < n; ++j) {
+                if (a[i].x1 - INV_MERGE_PAD_PX > a[j].x2 || a[j].x1 - INV_MERGE_PAD_PX > a[i].x2 ||
+                    a[i].y1 - INV_MERGE_PAD_PX > a[j].y2 || a[j].y1 - INV_MERGE_PAD_PX > a[i].y2) continue;
+                area_union(a[i], a[j]);
+                a[j] = a[--n];
+                merged = true;
+                break;
+            }
+        }
+        if (!merged) break;
+    }
+    if (n > INV_MAX_AREAS) {
+        for (int i = 1; i < n; ++i) area_union(a[0], a[i]);
+        n = 1;
+    }
+    return n;
+}
+
+// Everything one drawn aircraft paints: the glyph with its selection/emergency rings
+// (glyph_bbox; Orb's waves add the 44 px box) and the trail polyline (2 px line). The
+// labels sit inside glyph_bbox (x +12..+168, y -14..+26), so they need no box of their own.
+static void drawn_bounds(const AcDraw &ac, lv_area_t &a) {
+    a = glyph_bbox(ac.pos);
+    if (orb() && ac.inRange) {
+        const lv_area_t w = { (lv_coord_t)(ac.pos.x - 44), (lv_coord_t)(ac.pos.y - 44),
+                              (lv_coord_t)(ac.pos.x + 44), (lv_coord_t)(ac.pos.y + 44) };
+        area_union(a, w);
+    }
+    if (ac.trail && !ac.trail->empty()) {
+        lv_area_t t = { ac.trail->front().x, ac.trail->front().y,
+                        ac.trail->front().x, ac.trail->front().y };
+        for (const lv_point_t &p : *ac.trail) {
+            if (p.x < t.x1) t.x1 = p.x;
+            if (p.y < t.y1) t.y1 = p.y;
+            if (p.x > t.x2) t.x2 = p.x;
+            if (p.y > t.y2) t.y2 = p.y;
+        }
+        t.x1 -= 2; t.y1 -= 2; t.x2 += 2; t.y2 += 2;
+        area_union(a, t);
+    }
+}
+
+// Per-hex drawn bounds of whatever for_each_drawn yields right now.
+struct HexArea { char hex[8]; lv_area_t a; };
+static int collect_drawn_bounds(HexArea *out, int max) {
+    int n = 0;
+    for_each_drawn([&](size_t, const AcDraw &ac) {
+        if (n >= max) return;
+        snprintf(out[n].hex, sizeof(out[n].hex), "%s", ac.hex);
+        drawn_bounds(ac, out[n].a);
+        ++n;
+    });
+    return n;
+}
+
+// A flow segment's dirty rect: its line, padded for the 2 px anti-aliased stroke.
+static inline void flow_seg_rect(const FlowSeg &s, lv_area_t &r) {
+    r.x1 = LV_MIN(s.a.x, s.b.x) - 2; r.y1 = LV_MIN(s.a.y, s.b.y) - 2;
+    r.x2 = LV_MAX(s.a.x, s.b.x) + 2; r.y2 = LV_MAX(s.a.y, s.b.y) + 2;
+}
+
 // Advance each glyph from its previous position toward the new target (ease-out),
 // invalidating only the small region each one occupies. Self-limiting: when a plane
 // barely moves (far away / slow), nx==pos and it's skipped — near-zero cost.
@@ -435,7 +585,7 @@ static void apply_clock_stage(int stage) {
     s_dialOpa  = stage >= 3 ? LV_OPA_COVER : (stage == 2 ? LV_OPA_50 : LV_OPA_TRANSP);
     const lv_opa_t letters = stage == 0 ? LV_OPA_COVER : (stage == 1 ? LV_OPA_50 : LV_OPA_TRANSP);
     for (lv_obj_t *r : s_rose) if (r) lv_obj_set_style_text_opa(r, letters, 0);
-    if (s_flowCanvas) lv_obj_set_style_img_opa(s_flowCanvas, s_dimOpa, 0);
+    cache_full_rerender();                     // the dim applies to everything in the cache
     if (s_parent && orb()) lv_obj_set_style_bg_opa(s_parent, s_dimOpa, 0);
     show(s_rangeLbl, stage == 0 && s_rangeLblVisible && !orb());
     show(s_clockLayer, stage != 0);
@@ -500,7 +650,7 @@ static void sweep_timer_cb(lv_timer_t *t) {
 
 // =============================== aircraft ====================================
 static void draw_trail(lv_draw_ctx_t *d, const AcDraw &ac, lv_color_t col) {
-    const int n = (int)ac.trail.size();
+    const int n = ac.trail ? (int)ac.trail->size() : 0;
     if (n < 2) return;
     lv_draw_line_dsc_t t;
     lv_draw_line_dsc_init(&t);
@@ -508,7 +658,7 @@ static void draw_trail(lv_draw_ctx_t *d, const AcDraw &ac, lv_color_t col) {
     t.width = 2;
     for (int i = 1; i < n; ++i) {
         t.opa = dim(10 + 45 * i / n);
-        lv_point_t a = ac.trail[i - 1], b = ac.trail[i];
+        lv_point_t a = (*ac.trail)[i - 1], b = (*ac.trail)[i];
         lv_draw_line(d, &t, &a, &b);
     }
 }
@@ -815,7 +965,7 @@ void setTheme(int t) {
     if (s_pulse)     lv_obj_set_style_border_color(s_pulse, s_cInk, 0);
     if (s_rangeLbl)  lv_obj_set_style_text_color(s_rangeLbl, s_cRing, 0);
 
-    flow_redraw_all();
+    cache_full_rerender();                             // flow colour + chrome follow the theme
     sweep_sync();
     if (s_parent) lv_obj_invalidate(s_parent);
     if (s_themeCb) s_themeCb(s_theme);
@@ -857,7 +1007,7 @@ bool sweepEnabled() { return s_sweepEnabled; }
 
 void setAirportsEnabled(bool on) {
     s_airportsEnabled = on;
-    if (s_gridLayer) lv_obj_invalidate(s_gridLayer);   // repaint the chrome with/without markers
+    cache_full_rerender();                             // repaint the chrome with/without markers
 }
 bool airportsEnabled() { return s_airportsEnabled; }
 
@@ -870,9 +1020,11 @@ void setTrailLength(int level) {
         case 3: s_trailMax = 12; s_flowMax = 1500; s_flowGenMax = 30; break;   // ~60 s
         default: s_trailMax = 7; s_flowMax = 700;  s_flowGenMax = 14; break;   // ~28 s
     }
-    if (s_flowMax == 0) { s_flow.clear(); s_trails.clear(); }
-    else while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
-    flow_redraw_all();                              // repaint the flow canvas at the new length
+    if (s_flowMax == 0) {
+        s_flow.clear();
+        for (TrailSlot &t : s_trailStore) { t.used = false; t.hex[0] = 0; t.pts.clear(); }
+    } else while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
+    cache_full_rerender();                          // repaint the flow layer at the new length
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
 
@@ -902,30 +1054,34 @@ void init(void *lv_parent) {
     s_cx = SCREEN_CX;
     s_cy = SCREEN_CY;
     s_acs.clear();
-    s_trails.clear();
+    for (TrailSlot &t : s_trailStore) { t.used = false; t.hex[0] = 0; t.pts.clear(); }
     s_flow.clear();
     s_selHex.clear();
-    s_flowRedrawCtr = 0;
 
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
-    if (!s_flowBuf) {
-        const size_t sz = LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(SCREEN_W, SCREEN_H);
+    if (!s_cacheBuf) {
+        const size_t sz = (size_t)SCREEN_W * SCREEN_H * sizeof(lv_color_t);
 #if defined(ESP_PLATFORM)
-        s_flowBuf = (lv_color_t *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+        s_cacheBuf = (lv_color_t *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
 #else
-        s_flowBuf = (lv_color_t *)malloc(sz);
+        s_cacheBuf = (lv_color_t *)malloc(sz);
 #endif
+        if (s_cacheBuf) memset(s_cacheBuf, 0, sz);
     }
-    s_flowCanvas = lv_canvas_create(parent);
-    lv_obj_clear_flag(s_flowCanvas, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    if (s_flowBuf) {
-        lv_canvas_set_buffer(s_flowCanvas, s_flowBuf, SCREEN_W, SCREEN_H, LV_IMG_CF_TRUE_COLOR_ALPHA);
-        lv_canvas_fill_bg(s_flowCanvas, lv_color_black(), LV_OPA_TRANSP);
+    if (s_cacheBuf) {
+        memset(&s_cacheDsc, 0, sizeof(s_cacheDsc));
+        s_cacheDsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+        s_cacheDsc.header.w  = SCREEN_W;
+        s_cacheDsc.header.h  = SCREEN_H;
+        s_cacheDsc.data_size = (uint32_t)((size_t)SCREEN_W * SCREEN_H * sizeof(lv_color_t));
+        s_cacheDsc.data      = (const uint8_t *)s_cacheBuf;
     }
-    lv_obj_center(s_flowCanvas);
+    s_bgImg = lv_img_create(parent);              // the scope cache: first child, bottom of the tile
+    lv_obj_clear_flag(s_bgImg, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    if (s_cacheBuf) lv_img_set_src(s_bgImg, &s_cacheDsc);
+    lv_obj_center(s_bgImg);
 
-    s_gridLayer = make_layer(parent, grid_draw_cb);
     s_sweep     = make_layer(parent, sweep_draw_cb);
     s_acLayer   = make_layer(parent, ac_draw_cb);
 
@@ -977,32 +1133,42 @@ void init(void *lv_parent) {
 }
 
 void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
-    std::vector<AcDraw> out;
-    out.reserve(aircraft.size());
-    std::set<std::string> present;
+    static std::vector<AcDraw> out;         // reused across polls (no per-poll allocation)
+    out.clear();
     const float R = (float)RADAR_R_OUTER_PX;
-    ++s_flowGen;                                  // one tick per poll; flow segments age in these units
+    ++s_flowGen;                            // one tick per poll; flow segments age in these units
 
     // Reproject the coastline only when the scope geometry actually changes (home
-    // moved or range zoomed) — never per frame. Then repaint the static chrome layer.
+    // moved or range zoomed) — never per frame. Then re-render the whole scope cache.
     static double s_coLat = 1e9, s_coLon = 1e9; static float s_coRange = -1.0f;
+    bool fullLayer = false;
     if (s.homeLat != s_coLat || s.homeLon != s_coLon || s.rangeKm != s_coRange) {
         const bool firstFix = (s_coRange < 0.0f);
         s_coLat = s.homeLat; s_coLon = s.homeLon; s_coRange = s.rangeKm;
         coastline_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
         airports_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
-        if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
         if (!firstFix) {
             // Scope scale/center changed: old trails were plotted at the previous
             // projection and would be wrong now — drop them and clear the flow layer.
-            s_trails.clear();
+            for (TrailSlot &t : s_trailStore) { t.used = false; t.hex[0] = 0; t.pts.clear(); }
             s_flow.clear();
-            flow_redraw_all();
+            fullLayer = true;               // every glyph jumps: repaint the whole aircraft layer
         }
+        cache_full_rerender();
     }
 
-    std::map<std::string, lv_point_t> prevPos;        // smooth-motion: glide starts here
-    for (const AcDraw &a : s_acs) prevPos[a.hex] = a.pos;
+    // What is on screen right now (old list, old selection, old trails — before this
+    // poll touches anything): per-hex unions of everything each drawn aircraft paints.
+    static HexArea before[ADSB_MAX_AIRCRAFT];
+    const int nBefore = fullLayer ? 0 : collect_drawn_bounds(before, ADSB_MAX_AIRCRAFT);
+
+    // Flow segments this poll adds or prunes dirty exactly their rects in the cache.
+    static lv_area_t flowDirty[ADSB_MAX_AIRCRAFT];
+    int nFlow = 0;
+    auto addFlowRect = [&](const FlowSeg &seg) {
+        if (nFlow < ADSB_MAX_AIRCRAFT) flow_seg_rect(seg, flowDirty[nFlow++]);
+        else { lv_area_t r; flow_seg_rect(seg, r); area_union(flowDirty[0], r); }
+    };
 
     comp_tick();
     for (const Aircraft &ac : aircraft) {
@@ -1017,12 +1183,14 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         target.y = (lv_coord_t)lroundf(p.y);
         d.to = target;
         {
-            auto pit = prevPos.find(std::string(ac.hex.c_str()));
-            if (pit != prevPos.end()) {
-                const long dx = (long)target.x - pit->second.x;
-                const long dy = (long)target.y - pit->second.y;
-                d.from = (dx * dx + dy * dy > 120L * 120L) ? target : pit->second;  // snap if it jumped
-            } else d.from = target;                                                  // new contact: appear in place
+            const AcDraw *prev = nullptr;   // smooth-motion: the glide starts at the old glyph
+            for (const AcDraw &o : s_acs)
+                if (strcmp(o.hex, ac.hex.c_str()) == 0) { prev = &o; break; }
+            if (prev) {
+                const long dx = (long)target.x - prev->pos.x;
+                const long dy = (long)target.y - prev->pos.y;
+                d.from = (dx * dx + dy * dy > 120L * 120L) ? target : prev->pos;  // snap if it jumped
+            } else d.from = target;                                              // new contact: appear in place
         }
 #if MOTION_INTERP
         d.pos = d.from;                  // begin the glide at the previous position
@@ -1044,50 +1212,59 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         d.distKm = (float)distKm;
         d.bearingDeg = (float)brg;
         d.squawk = ac.squawk;
+        d.trail = nullptr;
         fmt_alt_txt(d.altTxt, sizeof(d.altTxt), ac.altBaro, ac.onGround);
 
-        const std::string key = ac.hex.c_str();
-        present.insert(key);
         if (d.inRange) {
-            std::vector<lv_point_t> &hist = s_trails[key];
-            const bool moved = hist.empty() ||
-                               abs((int)hist.back().x - (int)target.x) > 0 ||
-                               abs((int)hist.back().y - (int)target.y) > 0;
-            if (moved) {
-                if (s_flowMax > 0 && !hist.empty()) {
-                    FlowSeg seg = { hist.back(), target, s_flowGen };
-                    s_flow.push_back(seg);
-                    while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
-                    flow_draw_seg(seg);
+            TrailSlot *slot = trail_slot(ac.hex.c_str());
+            if (slot) {
+                if (!slot->used) { slot->used = true; snprintf(slot->hex, sizeof(slot->hex), "%s", ac.hex.c_str()); }
+                std::vector<lv_point_t> &hist = slot->pts;
+                const bool moved = hist.empty() ||
+                                   abs((int)hist.back().x - (int)target.x) > 0 ||
+                                   abs((int)hist.back().y - (int)target.y) > 0;
+                if (moved) {
+                    if (s_flowMax > 0 && !hist.empty()) {
+                        FlowSeg seg = { hist.back(), target, s_flowGen };
+                        s_flow.push_back(seg);
+                        while ((int)s_flow.size() > s_flowMax) { addFlowRect(s_flow.front()); s_flow.pop_front(); }
+                        addFlowRect(seg);
+                    }
+                    if (s_trailMax > 0) {
+                        hist.push_back(target);
+                        while ((int)hist.size() > s_trailMax) hist.erase(hist.begin());
+                    } else {
+                        hist.clear();
+                    }
                 }
-                if (s_trailMax > 0) {
-                    hist.push_back(target);
-                    while ((int)hist.size() > s_trailMax) hist.erase(hist.begin());
-                } else {
-                    hist.clear();
-                }
+                d.trail = &hist;
             }
-            d.trail = hist;
         }
         out.push_back(std::move(d));
     }
 
-    for (auto it = s_trails.begin(); it != s_trails.end();) {
-        if (present.find(it->first) == present.end()) it = s_trails.erase(it);
-        else ++it;
+    for (TrailSlot &t : s_trailStore) {    // forget the histories of contacts that left
+        if (!t.used) continue;
+        bool present = false;
+        for (const Aircraft &ac : aircraft)
+            if (strcmp(ac.hex.c_str(), t.hex) == 0) { present = true; break; }
+        if (!present) { t.used = false; t.hex[0] = 0; t.pts.clear(); }
     }
-    if (!s_selHex.empty() && present.find(s_selHex) == present.end()) s_selHex.clear();
+    if (!s_selHex.empty()) {
+        bool selPresent = false;
+        for (const Aircraft &ac : aircraft)
+            if (s_selHex == ac.hex.c_str()) { selPresent = true; break; }
+        if (!selPresent) s_selHex.clear();
+    }
 
     // Fade the flow layer by AGE, not just count: drop segments older than s_flowGenMax
     // polls so old tracks self-clear even in busy airspace (a 5 nm view doesn't stay caked
-    // in green). If any were dropped, repaint the flow canvas so they actually disappear.
+    // in green). Each dropped segment dirties exactly its rect in the cache.
     if (s_flowGenMax > 0 && !s_flow.empty()) {
-        bool pruned = false;
         while (!s_flow.empty() && (uint16_t)(s_flowGen - s_flow.front().gen) > (uint16_t)s_flowGenMax) {
+            addFlowRect(s_flow.front());
             s_flow.pop_front();
-            pruned = true;
         }
-        if (pruned) flow_redraw_all();
     }
 
     // nearest first (the blips + the list). s_maxOnScreen is applied only when drawing /
@@ -1095,15 +1272,10 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     std::sort(out.begin(), out.end(),
               [](const AcDraw &a, const AcDraw &b) { return a.distKm < b.distKm; });
 
-    if (++s_flowRedrawCtr >= FLOW_REDRAW_EVERY) {
-        s_flowRedrawCtr = 0;
-        flow_redraw_all();
-    }
-
     if (s_rangeLbl) {                                 // keep the range label in sync with settings
         char r[16];
         snprintf(r, sizeof(r), "%.0f km", (double)s.rangeKm);
-        lv_label_set_text(s_rangeLbl, r);
+        if (strcmp(lv_label_get_text(s_rangeLbl), r) != 0) lv_label_set_text(s_rangeLbl, r);
     }
 
     const uint32_t now = lv_tick_get();              // measure actual cadence for the glide clock
@@ -1113,8 +1285,39 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     s_lastUpdateMs = now;
     s_animStartMs  = now;
 
-    s_acs = std::move(out);
-    if (s_acLayer) lv_obj_invalidate(s_acLayer);
+    s_acs.swap(out);                                 // out keeps the old buffer for the next poll
+
+    // Invalidate only what a poll changed on the aircraft layer: per hex, the union of
+    // the drawn bounds before and after (glyph + rings/waves, trail).
+    if (s_acLayer && !fullLayer) {
+        static HexArea after[ADSB_MAX_AIRCRAFT];
+        const int nAfter = collect_drawn_bounds(after, ADSB_MAX_AIRCRAFT);
+        static lv_area_t inv[2 * ADSB_MAX_AIRCRAFT];
+        int nInv = 0;
+        for (int i = 0; i < nBefore; ++i) {
+            int j;
+            for (j = 0; j < nAfter; ++j)
+                if (strcmp(after[j].hex, before[i].hex) == 0) { area_union(before[i].a, after[j].a); break; }
+            inv[nInv++] = before[i].a;                // left, moved, or re-labelled
+        }
+        for (int j = 0; j < nAfter; ++j) {
+            bool seen = false;
+            for (int i = 0; i < nBefore; ++i)
+                if (strcmp(before[i].hex, after[j].hex) == 0) { seen = true; break; }
+            if (!seen) inv[nInv++] = after[j].a;     // newly drawn this poll
+        }
+        nInv = inv_merge(inv, nInv);
+        for (int i = 0; i < nInv; ++i) lv_obj_invalidate_area(s_acLayer, &inv[i]);
+    } else if (s_acLayer) {
+        lv_obj_invalidate(s_acLayer);
+    }
+
+    // Re-render the cache where flow segments were added or pruned, and show the change.
+    nFlow = inv_merge(flowDirty, nFlow);
+    for (int i = 0; i < nFlow; ++i) {
+        cache_render_rect(&flowDirty[i]);
+        if (s_bgImg) lv_obj_invalidate_area(s_bgImg, &flowDirty[i]);
+    }
 }
 
 int hitTest(int x, int y) {
