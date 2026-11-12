@@ -4,6 +4,7 @@
 // Device-only. All network is on core 0 (adsb_task); the UI just displays the buffer.
 #include "photo_client.h"
 #include "photo.h"
+#include "text_ascii.h"
 #include "config.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -128,7 +129,7 @@ bool photo_fetch(const char *hex) {
 
     const char *imgUrl = doc["photos"][0]["thumbnail_large"]["src"] | "";
     char credit[40];
-    snprintf(credit, sizeof(credit), "%s", (const char *)(doc["photos"][0]["photographer"] | ""));
+    text_ascii_fold(doc["photos"][0]["photographer"] | "", credit, sizeof(credit));  // fonts are ASCII-only
     if (!imgUrl[0]) { Serial.printf("[photo] %s: no photo available\n", hex); photo_commit(0, 0, hex, ""); return false; }
 
     // 2) download the JPEG thumbnail.

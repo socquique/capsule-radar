@@ -39,6 +39,7 @@ run adsb_pacing -Isrc tests/adsb_pacing_test.cpp
 run feed_watchdog -Isrc tests/feed_watchdog_test.cpp
 run clock_face -Isrc tests/clock_face_test.cpp
 run panel_scale -Isrc -Itests/stubs -DBOARD_LCD185C_V2 tests/panel_scale_test.cpp
+run text_ascii -Isrc tests/text_ascii_test.cpp
 
 if [ -d "$AJ" ]; then
     run adsb_json_stream -Itests/stubs -I"$AJ" \
