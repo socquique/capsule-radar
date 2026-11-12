@@ -232,7 +232,7 @@ bool audio_begin() {
 }
 
 bool audio_present() { return s_ok; }
-void audio_set_volume(int)     {}                     // a buzzer has no level; mute only
+void audio_set_volume(int pct) { s_vol = constrain(pct, 0, 100); }
 void audio_set_muted(bool m) { s_muted = m; }
 
 void audio_play(AudioCue cue) {
