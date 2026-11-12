@@ -1,7 +1,7 @@
 #pragma once
 // ES8311 codec + speaker: short alert "pings". Device-only.
 // Boards with an on/off buzzer instead (BOARD_HAS_BUZZER, the LCD 2.1) beep the same cues:
-// no pitch or volume there, and volume 0 silences it like mute.
+// no pitch or volume there (the web page hides the slider); "Mute alerts" silences it.
 //
 // Bus discipline: the ES8311 is configured over the shared I2C bus, so audio_begin()
 // MUST run on core 1 (setup), like the other I2C devices. Playback afterwards only

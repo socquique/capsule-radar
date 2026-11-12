@@ -495,6 +495,13 @@ static bool refuseUnlessPageFetch() {
     return refuseIfCrossSite();
 }
 
+// A buzzer has no level (BOARD_HAS_BUZZER ignores the volume), so its page has no slider.
+#if BOARD_HAS_BUZZER
+#define VOL_HIDE " hidden"
+#else
+#define VOL_HIDE ""
+#endif
+
 static void handleRoot() {
     const int th = radar::theme();
     // The page's own list (WEB_RANGE_KM, config.h) ends at 150 km: it once offered 250,
@@ -691,8 +698,8 @@ static void handleRoot() {
         "<label>Units</label><select onchange='u(this.value)'>%s</select>"
         "<label>Weather temperature</label><select onchange='tu(this.value)'>%s</select></div>"
         "<div class=card><div class=t>Sound</div>"
-        "<label>Volume</label>"
-        "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
+        "<div" VOL_HIDE "><label>Volume</label>"
+        "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'></div>"
         "<label><input type=checkbox class=ck %s onchange='m(this.checked)'>Mute alerts</label>"
         "<label>Alert on</label><select onchange='al(this.value)'>%s</select>"
         "<label>Proximity alert</label><select onchange='px(this.value)'>%s</select>"

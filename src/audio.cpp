@@ -232,7 +232,7 @@ bool audio_begin() {
 }
 
 bool audio_present() { return s_ok; }
-void audio_set_volume(int pct) { s_vol = constrain(pct, 0, 100); }
+void audio_set_volume(int)     {}                     // a buzzer has no level; mute only
 void audio_set_muted(bool m) { s_muted = m; }
 
 void audio_play(AudioCue cue) {
@@ -264,7 +264,6 @@ void audio_loop() {}
 #include "tca9554.h"
 
 static bool s_ok = false;
-static volatile int  s_vol = 60;
 static volatile bool s_muted = false;
 static const uint16_t PAT_NEW[]   = { 160 };            // soft single beep
 static const uint16_t PAT_ALERT[] = { 80, 40, 80 };     // urgent double beep
@@ -289,11 +288,12 @@ bool audio_begin() {
     return true;
 }
 bool audio_present()           { return s_ok; }
-void audio_set_volume(int pct) { s_vol = constrain(pct, 0, 100); }
+void audio_set_volume(int)     {}                     // a buzzer has no level; mute only
 void audio_set_muted(bool m)   { s_muted = m; }
 
 void audio_play(AudioCue cue) {
-    if (!s_ok || s_muted || s_vol <= 0) return;
+    // No volume here: the web page hides the slider, so a saved 0 must not silence it.
+    if (!s_ok || s_muted) return;
     if (cue == AUDIO_ALERT) {
         if (!s_alertPlaying) start(PAT_ALERT, 3, true); // an alert cuts a ping short
     } else if (!s_pat) {
