@@ -35,7 +35,7 @@ A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Touch-AMOLED-1.75**
   - **Orb** — green gradient + grid scope: the 7 nearest aircraft as yellow orbs emitting waves, off-range traffic as edge arrows pointing its way, orange target rings.
   - **Amber CRT** and **Military** — the same scope retinted (warm amber / night-vision green).
 - **Touch** (CST9217): tap an aircraft → detail card (callsign, type, altitude, vertical speed, ground speed, distance, ground track (HDG), squawk, and **origin → destination** looked up from adsbdb, cached in NVS); the X in its corner, a tap just outside the card, or a tap on empty scope closes it. The on-screen zoom button cycles the zoom range (10–100 km; the web page goes to 150 km). Swipe between **Radar / List / Stats** (circular layouts).
-- **Boot splash** + **alert pings** (ES8311 speaker): a soft ping when a new aircraft enters range, an urgent double-beep for emergency/military — volume & mute on the web page.
+- **Boot splash** + **alert pings** (ES8311 speaker): a soft ping when a new aircraft enters range, an urgent double-beep for emergency/military — volume & mute on the web page. The LCD 2.1 beeps the same alerts on its buzzer (mute only).
 - **Smooth motion**: aircraft glyphs glide between polls (interpolated) instead of jumping, using cheap partial redraws.
 - **Top HUD**: WiFi status (amber if the data feed is failing), in-range aircraft count, NTP/RTC clock, **battery %** (charging bolt, red when low), and the date. The Stats view footer shows how to reach the config page (`capsuleradar.local` + IP).
 - **Battery aware** (AXP2101): shows charge level, warns when low, and slows the feed poll rate on battery to save power.
@@ -78,7 +78,8 @@ the old panel settings. Fresh clones and CI are not affected.
 
 The 2.1-inch board uses a 480×480 ST7701 RGB IPS panel, CST820 touch, and a
 TCA9554 GPIO expander. Its pin map and timings live in `src/boards/board_lcd_21.h`.
-It has no PMIC or audio codec; battery reporting and alert sounds are disabled.
+It has no PMIC or audio codec, so there is no battery reporting; the alerts beep on its
+onboard buzzer instead (mute on the web page, no volume).
 
 Build with `pio run -e esp32-s3-lcd-21`; upload over USB with `-t upload`, or use
 `pio run -e esp32-s3-lcd-21-ota -t upload` once connected to WiFi.
@@ -86,10 +87,10 @@ Release assets include `CapsuleRadar-esp32s3-lcd21.bin` (merged USB image at 0x0
 and `CapsuleRadar-ota-lcd21.bin` (app-only image for the device's web update page).
 The browser flasher currently supports the AMOLED boards.
 
-The LCD environment rebuilds ESP-IDF with IRAM-safe LCD/GDMA interrupts and octal
-PSRAM enabled for RGB refresh during WiFi flash operations. Its initial build takes
-longer than the AMOLED environments. The QSPI sweep compositor remains enabled on
-AMOLED; the RGB panel uses the shared LVGL sweep renderer.
+The LCD environment rebuilds ESP-IDF with its own RGB-panel settings (`custom_sdkconfig`),
+so its first build takes longer than the AMOLED environments. Since 1.8.0 it uses the
+same sweep compositor as the AMOLED boards, with partial refresh at 0/90/180/270 degrees
+(#60): the sweep turns smoothly and quick taps register first time.
 
 ### Where to buy the board
 
