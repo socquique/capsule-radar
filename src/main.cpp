@@ -634,9 +634,10 @@ static void handleRoot() {
     if (gps_present()) {
         gpsRow  = "<label><input type=checkbox class=ck ";
         gpsRow += g_useGps ? "checked" : "";
-        gpsRow += " onchange='gp(this.checked)'>Use GPS for location</label>";
+        gpsRow += " onchange='gp(this.checked)'>Use GPS for location *</label>";
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
-                  "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
+                  "When on, the location above is used until the GPS gets a fix, then it takes over.<br>"
+                  "* Applies immediately; Save &amp; restart not needed.</div>";
     }
     // 16 KB: the page outgrew 10 KB (~10.3 KB with the GPS row), and snprintf silently cut
     // off the closing </script>, so none of the live-setting handlers existed in the browser.
