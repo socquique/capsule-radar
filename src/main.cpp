@@ -501,6 +501,12 @@ static bool refuseUnlessPageFetch() {
 #else
 #define VOL_HIDE ""
 #endif
+// With neither a codec nor a buzzer (the 1.43), every Sound control is a silent no-op: no card.
+#if BOARD_HAS_AUDIO || BOARD_HAS_BUZZER
+#define SOUND_HIDE ""
+#else
+#define SOUND_HIDE " hidden"
+#endif
 
 static void handleRoot() {
     const int th = radar::theme();
@@ -697,7 +703,7 @@ static void handleRoot() {
         "<input type=number min=0 max=359 step=1 value='%d' onchange='ro(this.value)'>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select>"
         "<label>Weather temperature</label><select onchange='tu(this.value)'>%s</select></div>"
-        "<div class=card><div class=t>Sound</div>"
+        "<div class=card" SOUND_HIDE "><div class=t>Sound</div>"
         "<div" VOL_HIDE "><label>Volume</label>"
         "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'></div>"
         "<label><input type=checkbox class=ck %s onchange='m(this.checked)'>Mute alerts</label>"
