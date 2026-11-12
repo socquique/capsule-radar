@@ -2,6 +2,7 @@
 // Returns origin/destination city names (English). Device-only.
 #include "route_client.h"
 #include "config.h"
+#include "text_ascii.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -56,8 +57,9 @@ bool route_cache_get(const char *callsign, char *from, size_t fn, char *to, size
     if (b2 < 0) return false;
     const uint32_t now = (uint32_t)time(nullptr);    // expire stale routes (reused callsigns)
     if (now > 1700000000UL && ts > 1700000000UL && (now - ts) > 86400UL) return false;  // 24 h TTL
-    snprintf(from, fn, "%s", rest.substring(0, b2).c_str());
-    snprintf(to, tn, "%s", rest.substring(b2 + 1).c_str());
+    // folded here too: entries cached before the fold may still hold accented letters
+    text_ascii_fold(rest.substring(0, b2).c_str(), from, fn);
+    text_ascii_fold(rest.substring(b2 + 1).c_str(), to, tn);
     return true;
 }
 
@@ -95,10 +97,10 @@ static void pick_airport(JsonObjectConst ap, char *out, size_t n) {
     if (s.length() == 0 || s.length() > 18) {           // name missing or too long -> municipality/IATA
         const char *muni = ap["municipality"] | "";
         const char *iata = ap["iata_code"] | "";
-        snprintf(out, n, "%s", muni[0] ? muni : iata);
+        text_ascii_fold(muni[0] ? muni : iata, out, n);   // fonts are ASCII-only
         return;
     }
-    snprintf(out, n, "%s", s.c_str());
+    text_ascii_fold(s.c_str(), out, n);
 }
 
 bool route_fetch(const char *callsign, char *from, size_t fn, char *to, size_t tn) {
