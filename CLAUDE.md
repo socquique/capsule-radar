@@ -35,6 +35,13 @@ porting there. Build with `-e esp32-s3-lcd-21`: `custom_sdkconfig` rebuilds ESP-
 first build is slow. The sideways shift (#49) was fixed in #54 (bounce buffers + page flip);
 after changing `custom_sdkconfig`, delete `sdkconfig.esp32-s3-lcd-21` or the old values stick.
 
+### Fourth board (experimental): ESP32-S3-Touch-LCD-1.85C V2
+A 360x360 **ST77916** QSPI LCD (Arduino_GFX `Arduino_ST77916`, LEDC backlight on GPIO 5),
+CST816 touch (the CST820 driver), panel/touch resets on a TCA9554, ES8311 audio, PCF85063
+RTC, no PMIC/IMU/GPS. Pins in `src/boards/board_lcd_185c_v2.h`. The UI stays 466x466 and
+`src/panel_scale.h` resamples it to the panel (`PANEL_W`/`PANEL_H` vs `SCREEN_W`/`SCREEN_H`).
+Build with `-e esp32-s3-lcd-185c-v2`.
+
 ## Stack decision
 **PlatformIO + Arduino framework.** Libraries:
 - `moononournation/GFX Library for Arduino` (Arduino_GFX) — CO5300 QSPI panel driver + framebuffer.
