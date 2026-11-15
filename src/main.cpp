@@ -724,10 +724,18 @@ static void handleRoot() {
         "MAP.on('click',function(e){MK.setLatLng(e.latlng);S(e.latlng);});"
         "setTimeout(function(){MAP.invalidateSize();},300);"
         "function G(p){fetch(p,{headers:{'" WEB_PAGE_HDR "':'1'}})}"
-        "function b(v,s){G('/bright?v='+v+(s?'&save=1':''))}"
-        "function v(x,s){G('/vol?v='+x+(s?'&save=1':''))}"
+        // A slider fires a request per step while it's dragged, and the server answers one at a
+        // time, so a fast drag could land out of order and leave an in-between value. SQ sends one
+        // request at a time per slider and keeps only the newest waiting one; the release value
+        // (with &save=1) comes last, so it is the one that sticks. Test ping waits for it.
+        "var Q={};"
+        "function SQ(k,p){if(Q[k]){Q[k].n=p;return}Q[k]={};"
+        "fetch(p,{headers:{'" WEB_PAGE_HDR "':'1'}}).catch(function(){}).then(function(){"
+        "var n=Q[k].n,f=Q[k].f;delete Q[k];if(n){SQ(k,n);Q[k].f=f}else if(f)f()})}"
+        "function b(v,s){SQ('b','/bright?v='+v+(s?'&save=1':''))}"
+        "function v(x,s){SQ('v','/vol?v='+x+(s?'&save=1':''))}"
         "function m(c){G('/vol?mute='+(c?1:0)+'&save=1')}"
-        "function t(){G('/vol?test=1')}"
+        "function t(){if(Q.v)Q.v.f=function(){G('/vol?test=1')};else G('/vol?test=1')}"
         "function d(v){G('/idle?v='+v+'&save=1')}"
         "function fd(c){G('/fdsleep?v='+(c?1:0)+'&save=1')}"
         "function sw(c){G('/sweep?v='+(c?1:0)+'&save=1')}"
