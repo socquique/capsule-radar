@@ -769,7 +769,7 @@ static void handleRoot() {
         "<button type=button class=sec onclick='t()'>Test ping</button></div>"
         "<div class=card><div class=t>Network</div>"
         "<p style='color:#9affc8;font-size:13px;margin:0 0 4px'>Forget the saved WiFi and reopen the setup portal.</p>"
-        "<form method=POST action=/wifi><button class=w>Reset WiFi</button></form></div>"
+        "<form method=POST action=/wifi onsubmit=\"return confirm('Forget the saved WiFi and reopen the setup portal?')\"><button class=w>Reset WiFi</button></form></div>"
         "<p class=ft>Reach me at <code>capsuleradar.local</code> &middot; <a href=/update style='color:#9affc8'>Firmware update</a> &middot; v" FW_VERSION "</p>"
         "<script>"
         "var C=[%.5f,%.5f];var MAP=L.map('map').setView(C,10);"
