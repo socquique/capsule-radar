@@ -878,8 +878,14 @@ static void handleSave() {
 static void handleWifi() {
     if (refuseIfCrossSite()) return;
     g_web.send(200, "text/html",
+        "<title>Capsule Radar - WiFi reset</title>"
         "<body style='background:#06100a;color:#ffb23c;font-family:sans-serif;padding:24px'>"
-        "WiFi reset. Connect to the <b>CapsuleRadar-Setup</b> network to reconfigure.</body>");
+        "WiFi reset. Join the <b>CapsuleRadar-Setup</b> WiFi network to set it up again; the setup "
+        "page usually opens by itself, or go to <a href=http://192.168.4.1/ style='color:#9affc8'>"
+        "192.168.4.1</a>. Once it's back on your network, the radar is at "
+        "<a href=http://capsuleradar.local/ style='color:#9affc8'>capsuleradar.local</a>."
+        // leave /wifi in the address bar and a later reload would send the reset again
+        "<script>history.replaceState(null,'','/')</script></body>");
     delay(400);                     // let the response reach the browser
     // The driver stores the saved AP in its own NVS namespace ("nvs.net80211"). On Arduino
     // core 3.x both wm.resetSettings() and WiFi.disconnect(true,true) can silently no-op
