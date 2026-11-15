@@ -31,7 +31,8 @@ static volatile bool s_muted = false;
 // Cue queue (not one shared slot + semaphore): with a single slot, an AUDIO_ALERT could
 // be overwritten by an AUDIO_NEW queued in the same poll, and the urgent ping never
 // played. A full queue (four cues; a burst of web "Test ping" presses fills it) drops a
-// new ping, but an alert jumps the queue and displaces the cue due next (audio_play).
+// new ping, but an alert or emergency jumps the queue and displaces the cue due next
+// (audio_play).
 static QueueHandle_t s_queue = nullptr;
 
 static void es_write(uint8_t reg, uint8_t val) {
@@ -155,6 +156,16 @@ static size_t gen_beep(int16_t *buf, size_t cap, float freq, int ms, float amp) 
     return i * 2;                                  // samples written (stereo interleaved)
 }
 
+// Queue `ms` of silence. A gap between beeps must be written as samples: the DMA holds
+// ~64 ms (4 x 256 frames at 16 kHz), so i2s_write() returns while a beep is still playing,
+// and a delay() shorter than that leaves no audible gap (the double beep sounds like one).
+static void write_silence(int16_t *buf, int ms) {
+    const size_t n = (size_t)((long)SR * ms / 1000) * 2;   // stereo samples
+    memset(buf, 0, n * sizeof(int16_t));
+    size_t bw;
+    i2s_write(I2S_PORT, buf, n * 2, &bw, portMAX_DELAY);
+}
+
 static void play_cue(int cue) {
     if (!s_ok || !s_buf || (s_muted && cue != 2) || s_vol <= 0) return;
     int16_t *buf = s_buf;
@@ -170,11 +181,18 @@ static void play_cue(int cue) {
     if (cue == 2) {                                // self-test: ~2 s continuous tone, PA held
         size_t ns = gen_beep(buf, S_BUF_LEN, 1000.0f, 480, amp);
         for (int k = 0; k < 4; ++k) i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
+    } else if (cue == AUDIO_EMERGENCY) {           // three rising beeps, distinct from the double beep
+        const float f[3] = {1320.0f, 1570.0f, 1760.0f};
+        for (int k = 0; k < 3; ++k) {
+            size_t ns = gen_beep(buf, S_BUF_LEN, f[k], 80, amp);
+            i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
+            if (k < 2) write_silence(buf, 70);
+        }
     } else if (cue == AUDIO_ALERT) {
         for (int k = 0; k < 2; ++k) {
             size_t ns = gen_beep(buf, S_BUF_LEN, 1320.0f, 80, amp);
             i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
-            delay(40);
+            if (k == 0) write_silence(buf, 70);
         }
     } else {
         size_t ns = gen_beep(buf, S_BUF_LEN, 880.0f, 160, amp);
@@ -239,9 +257,9 @@ void audio_play(AudioCue cue) {
     if (!s_ok || s_muted || !s_queue) return;
     const int c = (int)cue;
     // Never blocks the LVGL loop.
-    if (cue != AUDIO_ALERT) { xQueueSend(s_queue, &c, 0); return; }   // full: drop the ping
+    if (cue == AUDIO_NEW) { xQueueSend(s_queue, &c, 0); return; }     // full: drop the ping
     if (xQueueSendToFront(s_queue, &c, 0) == pdTRUE) return;
-    // Full: the alert takes the place of the cue due next. Every producer runs on this
+    // Full: the alert / emergency takes the place of the cue due next. Every producer runs on this
     // (loop) task and the audio task only ever empties the queue, so the slot stays free.
     int displaced;
     xQueueReceive(s_queue, &displaced, 0);
@@ -267,16 +285,17 @@ static bool s_ok = false;
 static volatile bool s_muted = false;
 static const uint16_t PAT_NEW[]   = { 160 };            // soft single beep
 static const uint16_t PAT_ALERT[] = { 80, 40, 80 };     // urgent double beep
+static const uint16_t PAT_EMERG[] = { 80, 40, 80, 40, 80 };  // emergency squawk: three short beeps
 static const uint16_t PAT_TEST[]  = { 2000 };           // self-test tone
 static const uint16_t *s_pat = nullptr;                 // cue playing (nullptr = idle)
 static uint8_t  s_patLen = 0, s_step = 0;
-static bool     s_alertPlaying = false;
+static uint8_t  s_urgency = 0;                          // of the cue playing: 0 ping, 1 alert, 2 emergency
 static uint32_t s_stepStart = 0;
 
 static void buzzer(bool on) { tca9554_set(EXIO_AUX, on ? 1 : 0); }
 
-static void start(const uint16_t *pat, uint8_t len, bool alert) {
-    s_pat = pat; s_patLen = len; s_step = 0; s_alertPlaying = alert;
+static void start(const uint16_t *pat, uint8_t len, uint8_t urgency) {
+    s_pat = pat; s_patLen = len; s_step = 0; s_urgency = urgency;
     s_stepStart = millis();
     buzzer(true);                                       // even steps sound, odd ones are gaps
 }
@@ -294,15 +313,17 @@ void audio_set_muted(bool m)   { s_muted = m; }
 void audio_play(AudioCue cue) {
     // No volume here: the web page hides the slider, so a saved 0 must not silence it.
     if (!s_ok || s_muted) return;
-    if (cue == AUDIO_ALERT) {
-        if (!s_alertPlaying) start(PAT_ALERT, 3, true); // an alert cuts a ping short
+    if (cue == AUDIO_EMERGENCY) {
+        if (!s_pat || s_urgency < 2) start(PAT_EMERG, 5, 2);   // cuts a ping or an alert short
+    } else if (cue == AUDIO_ALERT) {
+        if (!s_pat || s_urgency < 1) start(PAT_ALERT, 3, 1);   // cuts a ping short
     } else if (!s_pat) {
-        start(PAT_NEW, 1, false);                       // busy: drop the ping
+        start(PAT_NEW, 1, 0);                           // busy: drop the ping
     }
 }
 
 void audio_selftest() {                                 // ignores mute, as on the codec boards
-    if (s_ok) start(PAT_TEST, 1, false);
+    if (s_ok) start(PAT_TEST, 1, 0);
 }
 
 void audio_loop() {
@@ -310,7 +331,7 @@ void audio_loop() {
     if (++s_step >= s_patLen) {
         buzzer(false);
         s_pat = nullptr;
-        s_alertPlaying = false;
+        s_urgency = 0;
         return;
     }
     s_stepStart = millis();

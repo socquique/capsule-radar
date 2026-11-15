@@ -180,19 +180,21 @@ static inline lv_color_t clock_lead_color() { return orb() ? ORB_ACCENT : s_cLea
 // then Orb's own caps (ORB_BLIPS in-range balls, ORB_ARROWS off-range arrows); phosphor
 // draws in-range traffic only. The selected aircraft is drawn wherever it sits, past every
 // cap: the list shows the whole feed, so a row picked there must still get its glyph, its
-// ring and a tap target. ac_draw_cb, hitTest and the Orb wave refresh all walk this one
-// list, so they cannot disagree about what is on screen.
+// ring and a tap target. An emergency squawk in range is drawn past every cap too, so an
+// emergency alert never points at an empty scope. ac_draw_cb, hitTest, isShown and the Orb
+// wave refresh all walk this one list, so they cannot disagree about what is on screen.
 template <typename F>
 static void for_each_drawn(F &&fn) {
     const bool drg = orb();
     int shown = 0, balls = 0, arrows = 0;
     for (size_t i = 0; i < s_acs.size(); ++i) {
         const AcDraw &ac = s_acs[i];
-        const bool sel = !s_selHex.empty() && s_selHex == ac.hex;
-        if (++shown > s_maxOnScreen && !sel) continue;
+        const bool sel  = !s_selHex.empty() && s_selHex == ac.hex;
+        const bool keep = sel || (ac.emergency && ac.inRange);   // drawn past every cap
+        if (++shown > s_maxOnScreen && !keep) continue;
         if (drg) {
             int &n = ac.inRange ? balls : arrows;
-            if (n >= (ac.inRange ? ORB_BLIPS : ORB_ARROWS) && !sel) continue;
+            if (n >= (ac.inRange ? ORB_BLIPS : ORB_ARROWS) && !keep) continue;
             ++n;
         } else if (!ac.inRange) {
             continue;
@@ -1168,6 +1170,12 @@ int countInRange() {
     int n = 0;
     for (const AcDraw &a : s_acs) if (a.inRange) ++n;
     return n;
+}
+
+bool isShown(const char *hex) {
+    bool found = false;
+    for_each_drawn([&](size_t, const AcDraw &ac) { if (!found && strcmp(ac.hex, hex) == 0) found = true; });
+    return found;
 }
 
 bool info(int idx, AcInfo &out) {

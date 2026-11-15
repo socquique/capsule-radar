@@ -59,6 +59,7 @@ bool selected(AcInfo& out);                 // false if nothing selected/visible
 // Snapshot access for the list / stats views.
 int  count();
 int  countInRange();                        // aircraft within the display range (for the HUD)
+bool isShown(const char *hex);              // is this aircraft drawn on the scope now? (alerts follow it)
 bool info(int idx, AcInfo& out);
 
 // Sweep self-animates via an internal timer; kept for API compatibility.

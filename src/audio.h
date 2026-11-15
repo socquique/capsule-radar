@@ -9,8 +9,10 @@
 #include <stdbool.h>
 
 enum AudioCue {
-    AUDIO_NEW   = 0,   // new aircraft entered range (soft single beep)
-    AUDIO_ALERT = 1,   // emergency / military contact (urgent double beep)
+    AUDIO_NEW       = 0,   // new aircraft entered range (soft single beep)
+    AUDIO_ALERT     = 1,   // military contact / proximity (urgent double beep)
+    // 2 is the internal self-test tone
+    AUDIO_EMERGENCY = 3,   // emergency squawk 7500/7600/7700 (three rising beeps; three buzzes)
 };
 
 bool audio_begin();                 // init ES8311 + I2S + PA + playback task (call on core 1)

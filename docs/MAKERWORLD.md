@@ -55,8 +55,8 @@ speaker, a small kickstand foot, and an engraved logo. Snap-/screw-together, no 
   amber CRT, and night-vision green.
 - 🔁 **On-screen zoom** button (10–100 km) and a **web config page** at
   `capsuleradar.local` (centre point, range, theme, brightness, sound, dim timer).
-- 🔊 **Alert pings** (built-in speaker): a soft ping for new contacts, an urgent beep
-  for emergency/military squawks. Volume + mute on the web.
+- 🔊 **Alert pings** (built-in speaker): a soft ping for new contacts, an urgent double
+  beep for military contacts, three rising beeps for an emergency squawk. Volume + mute on the web.
 - 🔋 **Battery-aware** (optional LiPo): on-screen %, low warning, slower polling on
   battery. 🕐 **Real-time clock** keeps time/date across power loss; **NTP** sync.
 - 🌙 **Smart dimming**: an idle analog clock or auto-dim (Clock or dim after…) and **face-down

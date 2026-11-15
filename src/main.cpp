@@ -28,7 +28,6 @@
 #include "battery.h"                 // AXP2101 battery gauge
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
 #include "audio.h"                   // ES8311 alert pings
-#include <set>                       // audio: track which contacts are in range
 #include <string>
 #include <WiFiManager.h>             // captive portal
 #include <Preferences.h>            // NVS (persist theme/settings)
@@ -64,7 +63,7 @@ static WiFiManager           g_wm;
 static int                   g_brightnessDay = BRIGHTNESS_DEFAULT;   // user brightness (web/NVS)
 static int                   g_volume = 60;                          // alert volume 0..100 (web/NVS)
 static bool                  g_muted  = false;                       // mute alert pings
-static int                   g_alertMode = 2;                        // 0=off 1=emergencies 2=new+emergencies (web/NVS)
+static int                   g_alertMode = 2;                        // 0=off 1=emergencies 2=new+emergencies 3=military+emergencies (web/NVS)
 static float                 g_proximityKm = 0.0f;                   // proximity alert radius, km (0=off) (web/NVS)
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
 static bool                  g_fdSleep = true;                       // face-down sleep (screen off) on/off (web/NVS)
@@ -310,7 +309,7 @@ static void loadSettings() {
     g_brightnessDay    = constrain(p.getInt("bright", BRIGHTNESS_DEFAULT), 5, 255);
     g_volume           = p.getInt("vol", 60);
     g_muted            = p.getBool("mute", false);
-    g_alertMode        = p.getInt("alertmode", 2);
+    g_alertMode        = constrain(p.getInt("alertmode", 2), 0, 3);
     g_proximityKm      = p.getFloat("proxkm", 0.0f);
     g_useGps           = p.getBool("usegps", false);
     g_trailLen         = p.getInt("traillen", 2);
@@ -329,39 +328,93 @@ static void loadSettings() {
     radar::setLargeText(g_bigText);
 }
 
-// Audio alerts. g_alertMode: 0 = off, 1 = emergencies only, 2 = new aircraft + emergencies.
+// Which aircraft the alerts have seen, and when: a fixed table of (id, last seen) in PSRAM,
+// so the alert memory never touches the internal heap TLS needs. When it's full the oldest
+// entry is reused. Ids are the 24-bit ICAO address from `hex`, plus a bit for '~' (non-ICAO)
+// addresses and a marker bit so 0 can mean an empty slot.
+static uint32_t acId(const char *hex) {
+    const bool tilde = (*hex == '~');
+    const uint32_t a = (uint32_t)strtoul(tilde ? hex + 1 : hex, nullptr, 16) & 0xFFFFFFu;
+    return a | (tilde ? (1u << 24) : 0u) | (1u << 25);
+}
+
+struct AlertMemory {
+    struct Slot { uint32_t id, at; };
+    Slot *s = nullptr;
+    bool ready() {
+        if (!s) s = (Slot *)heap_caps_calloc_prefer(ALERT_MEMORY_SLOTS, sizeof(Slot), 2,
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        return s != nullptr;
+    }
+    // seen within `windowMs` of `now`?
+    bool recent(uint32_t id, uint32_t now, uint32_t windowMs) const {
+        for (int i = 0; i < ALERT_MEMORY_SLOTS; ++i)
+            if (s[i].id == id) return now - s[i].at <= windowMs;
+        return false;
+    }
+    void touch(uint32_t id, uint32_t now) {
+        int victim = 0;
+        for (int i = 0; i < ALERT_MEMORY_SLOTS; ++i) {
+            if (s[i].id == id) { s[i].at = now; return; }
+            if (s[i].id == 0) { victim = i; break; }                 // first empty slot
+            if (now - s[i].at > now - s[victim].at) victim = i;      // else the oldest
+        }
+        s[victim] = { id, now };
+    }
+};
+
+// Audio alerts. g_alertMode (values kept stable for NVS; the web list shows them in a
+// different order): 0 = off, 1 = emergency squawks only, 3 = new military aircraft +
+// emergencies, 2 = new aircraft + emergencies (military included).
 // g_proximityKm > 0 also pings (once) when any aircraft crosses into that radius.
+// "New" means not in range during the last ALERT_FORGET_MS (and "crosses into the radius"
+// likewise): an aircraft that drops out of the feed for a poll or two, such as a low
+// helicopter or one flying along the range edge, would otherwise ping every time it came back.
+// Pings follow what is DRAWN (radar::isShown: in range and among the nearest aircraft the
+// scope shows), so a beep always has a glyph to look at; one that is in range but not drawn
+// pings when it first appears. Emergency squawks in range are always drawn (past every cap).
+// An emergency squawk (7500/7600/7700) pings when the aircraft enters range squawking it, or
+// when one already in range starts squawking it; again only if it wasn't squawking one in the
+// last ALERT_EMERG_REPING_MS, so a squawk that flickers in the feed doesn't ping every poll.
 static void checkAudioEvents() {
     if (!audio_present()) return;
-    static std::set<std::string> seen, seenProx;
+    static AlertMemory seen, seenProx, squawked;
     static bool first = true;
     static uint32_t lastNew = 0;
-    std::set<std::string> now, nowProx;
+    if (!seen.ready() || !seenProx.ready() || !squawked.ready()) return;
+    const uint32_t nowMs = millis();
     for (const Aircraft &ac : g_snap) {
         const double d = geo::haversineKm(g_settings.homeLat, g_settings.homeLon, ac.lat, ac.lon);
         if (d > g_settings.rangeKm) continue;                 // in-range only
-        const std::string hex = ac.hex.c_str();
-        now.insert(hex);
-        const bool isNew     = !first && !seen.count(hex);
-        const bool emergency = acIsEmergency(ac.squawk) || ac.military;  // military: feed dbFlags
+        if (!radar::isShown(ac.hex.c_str())) continue;        // and drawn on the scope
+        const uint32_t id = acId(ac.hex.c_str());
+        const bool isNew     = !first && !seen.recent(id, nowMs, ALERT_FORGET_MS);
+        seen.touch(id, nowMs);
+        const bool squawk    = acIsEmergency(ac.squawk);                // ac.military: feed dbFlags
 
-        // proximity: fire once, when an aircraft first crosses into the radius (any aircraft)
-        if (g_proximityKm > 0.0f && d <= g_proximityKm) {
-            nowProx.insert(hex);
-            if (!first && !seenProx.count(hex)) audio_play(AUDIO_ALERT);
+        // emergency squawk: on entry or mid-flight, in any mode but off
+        if (squawk) {
+            if (!first && g_alertMode != 0 && !squawked.recent(id, nowMs, ALERT_EMERG_REPING_MS))
+                audio_play(AUDIO_EMERGENCY);                    // its own sound: three rising beeps
+            squawked.touch(id, nowMs);
         }
 
-        // new-in-range pings (on entry), gated by the alert mode
-        if (isNew) {
-            if (emergency) { if (g_alertMode >= 1) audio_play(AUDIO_ALERT); }   // emergencies only / +new
-            else if (g_alertMode >= 2 && millis() - lastNew > 3000) {
+        // proximity: fire once, when an aircraft first crosses into the radius (any drawn aircraft)
+        if (g_proximityKm > 0.0f && d <= g_proximityKm) {
+            if (!first && !seenProx.recent(id, nowMs, ALERT_FORGET_MS)) audio_play(AUDIO_ALERT);
+            seenProx.touch(id, nowMs);
+        }
+
+        // new pings (on first appearing on the scope), gated by the alert mode
+        if (isNew && !squawk) {                                           // squawks: above
+            if (ac.military) { if (g_alertMode >= 2) audio_play(AUDIO_ALERT); } // military: modes 2 and 3
+            else if (g_alertMode == 2 && nowMs - lastNew > 3000) {
                 audio_play(AUDIO_NEW);                                          // new contact (rate-limited)
-                lastNew = millis();
+                lastNew = nowMs;
             }
         }
     }
-    seen.swap(now);
-    seenProx.swap(nowProx);
     first = false;
 }
 
@@ -604,11 +657,14 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", mv.ft, mv.ft == g_maxAltFt ? " selected" : "", mv.lbl);
         mbopts += o;
     }
-    const char *anames[] = {"Off", "Emergencies only", "New aircraft + emergencies"};
+    // Shown in this order; the values are the stored g_alertMode (3 was added later).
+    const struct { int v; const char *name; } amodes[] = {
+        {0, "Off"}, {1, "Emergencies only"}, {3, "New military aircraft + emergencies"},
+        {2, "New aircraft + emergencies"}};
     String aopts;
-    for (int i = 0; i < 3; ++i) {
-        char o[80];
-        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_alertMode ? " selected" : "", anames[i]);
+    for (const auto &am : amodes) {
+        char o[96];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", am.v, am.v == g_alertMode ? " selected" : "", am.name);
         aopts += o;
     }
     const int proxUnit[] = {0, 2, 5, 10, 25};   // 0 = off; rest in the user's distance unit
@@ -869,15 +925,18 @@ static void handleVol() {
         p.end();
     }
     if (g_web.hasArg("test")) {
-        if (g_web.arg("test").toInt() == 2) audio_selftest();   // long tone, ignores mute
-        else audio_play(AUDIO_NEW);
+        const int t = g_web.arg("test").toInt();
+        if (t == 2)      audio_selftest();              // long tone, ignores mute
+        else if (t == 3) audio_play(AUDIO_EMERGENCY);   // check the alert sounds by ear
+        else if (t == 4) audio_play(AUDIO_ALERT);
+        else             audio_play(AUDIO_NEW);
     }
     g_web.send(200, "text/plain", "ok");
 }
 
 static void handleAlerts() {   // what triggers the alert sound (live)
     if (refuseUnlessPageFetch()) return;
-    if (g_web.hasArg("mode")) g_alertMode   = constrain((int)g_web.arg("mode").toInt(), 0, 2);
+    if (g_web.hasArg("mode")) g_alertMode   = constrain((int)g_web.arg("mode").toInt(), 0, 3);
     if (g_web.hasArg("prox")) {
         g_proximityKm = g_web.arg("prox").toFloat();   // km (0 = off)
         g_requeryKm = queryRadiusKm();                 // the query must cover the new alert circle

@@ -63,8 +63,8 @@ engraved logo. No soldering — the Waveshare board carries all the electronics.
   clock, **battery %** (charging bolt; turns **red** when low), and the date.
 
 **Sound (built-in speaker)**
-- A soft **ping** when a new aircraft enters range, and an urgent **double-beep** for
-  emergency / military contacts. Volume, mute and a test button are on the web page.
+- A soft **ping** when a new aircraft enters range, an urgent **double-beep** for
+  military contacts, and three rising beeps for an emergency squawk. Volume, mute and a test button are on the web page.
 
 **Power & time**
 - **Battery aware** (optional LiPo): on-screen charge %, low-battery warning, and a
