@@ -63,6 +63,15 @@ The Waveshare **ESP32-S3-Touch-AMOLED-1.43** is also supported in-tree. Same SoC
 
 Pin maps live in [`src/boards/`](src/boards/), one header per board, selected by a `-DBOARD_*` build flag. They are taken from the vendor board definition and then **confirmed on hardware** — never guessed. Shared tunables stay in [`src/config.h`](src/config.h).
 
+### M5Stack StopWatch (C152)
+
+Same ESP32-S3R8 and 466×466 CO5300 panel, but the panel and touch have no reset GPIO: power
+and both resets go through its M5PM1 PMIC and M5IOE1 expander (`src/board_stopwatch.cpp`, the
+sequence M5GFX uses). CST820 touch. Battery, audio (ES8311), IMU (BMI270) and RTC (RX8130CE)
+are not driven yet. Its two keys act on the radar: **A** steps the range, **B** the theme.
+Build with `pio run -e esp32-s3-stopwatch -t upload`; for download mode hold the power key
+~2 s until the green LED lights.
+
 ### Waveshare ESP32-S3-Touch-LCD-2.1 (experimental)
 
 Contributed by @alexzogh in #45. **Experimental:** touch, WiFi, the feed and web updates work.

@@ -11,6 +11,7 @@ build flag (see [`../src/config.h`](../src/config.h)):
 |---|---|---|---|
 | ESP32-S3-Touch-AMOLED-1.75 (reference) | `esp32-s3-amoled-175` | *(default)* | `board_amoled_175.h` |
 | ESP32-S3-Touch-AMOLED-1.43 | `esp32-s3-amoled-143` | `-DBOARD_AMOLED_143` | `board_amoled_143.h` |
+| M5Stack StopWatch (C152) | `esp32-s3-stopwatch` | `-DBOARD_STOPWATCH` | `board_stopwatch.h` |
 
 ---
 

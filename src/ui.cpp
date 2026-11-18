@@ -375,6 +375,13 @@ static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cance
     s_rangeShowing = true;             // until ui_frame_done()
 }
 
+void ui_key(int key, bool idle) {
+    lv_disp_trig_activity(NULL);                 // a press on a dimmed screen / idle clock only wakes it
+    if (idle || !ui_sweep_visible()) return;     // radar tile only
+    if (key == 0) zoom_cb(nullptr);
+    else          radar::cycleTheme();
+}
+
 void ui_set_range_km(float km) {
     s_rangeKm = km;
     if (s_zoomLbl) {
