@@ -652,7 +652,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
 
     if (arbitrary && s_frameBuf && s_rotBuf) {
         flush_arbitrary(area);
-        if (lv_disp_flush_is_last(drv)) s_frameCount++;
+        if (lv_disp_flush_is_last(drv)) { s_frameCount++; ui_frame_done(); }
         lv_disp_flush_ready(drv);
         return;
     }
@@ -688,7 +688,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
         default: break;  // 0°
     }
     draw_block(dx, dy, out, dw, dh);
-    if (lv_disp_flush_is_last(drv)) s_frameCount++;
+    if (lv_disp_flush_is_last(drv)) { s_frameCount++; ui_frame_done(); }
     lv_disp_flush_ready(drv);
 }
 

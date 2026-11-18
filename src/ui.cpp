@@ -324,16 +324,55 @@ static void poweroff_cb(lv_event_t *e) {
 
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
 
+// The range button's invisible tap margin: 18 px above and beside it, and down to the
+// screen edge below it, where taps aimed at its lower edge tend to land.
+#define ZOOM_TAP_PAD     18
+#define ZOOM_TAP_PAD_DN  34
+static void zoom_hit_cb(lv_event_t *e) {
+    lv_hit_test_info_t *info = (lv_hit_test_info_t *)lv_event_get_param(e);
+    lv_area_t a;
+    lv_obj_get_coords(lv_event_get_target(e), &a);
+    a.x1 -= ZOOM_TAP_PAD; a.x2 += ZOOM_TAP_PAD;
+    a.y1 -= ZOOM_TAP_PAD; a.y2 += ZOOM_TAP_PAD_DN;
+    info->res = _lv_area_is_point_on(&a, info->point, 0);
+}
+
+// A range change is only "seen" once the frame showing it has been sent to the panel.
+// Taps made before that are re-taps by someone who can't see the result yet: while the
+// scope repaints, touches are queued and arrive together right after the frame.
+#define ZOOM_SETTLE_MS       150    // ...so also drop taps this soon after it is shown
+#define ZOOM_SHOW_TIMEOUT_MS 3000   // never wait longer than this for the frame
+static bool s_rangeShowing = false;           // a range change is waiting for its frame
+static uint32_t s_rangeChangedMs = 0, s_rangeShownMs = 0;
+
+void ui_frame_done(void) {
+    if (!s_rangeShowing) return;
+    s_rangeShowing = false;
+    s_rangeShownMs = lv_tick_get();
+}
+
+// The range button sits on the scope, so it follows the theme's ring colour like the
+// scope's own range label (the rest of the UI chrome stays UI_GREEN).
+void ui_apply_theme(void) {
+    if (!s_zoomBtn || !s_zoomLbl) return;
+    const lv_color_t c = lv_color_hex(radar::accentRgb());
+    lv_obj_set_style_border_color(s_zoomBtn, c, 0);
+    lv_obj_set_style_text_color(s_zoomLbl, c, 0);
+}
+
 static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cancel on the tileview)
     (void)e;
     static uint32_t last = 0;
     const uint32_t now = lv_tick_get();
-    if (now - last < 250) return;      // debounce repeated/held presses
-    last = now;
+    if (s_rangeShowing && now - s_rangeChangedMs >= ZOOM_SHOW_TIMEOUT_MS) s_rangeShowing = false;
+    if (now - last < 250 || s_rangeShowing || now - s_rangeShownMs < ZOOM_SETTLE_MS)
+        return;                        // debounce, and hold re-taps until the new range is shown
     if (!s_rangeCb) return;
     const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
     s_rangeIdx = (s_rangeIdx + 1) % n;
     s_rangeCb(RANGE_STEPS_KM[s_rangeIdx]);
+    last = s_rangeChangedMs = lv_tick_get();
+    s_rangeShowing = true;             // until ui_frame_done()
 }
 
 void ui_set_range_km(float km) {
@@ -1098,7 +1137,9 @@ void ui_create(void) {
     // on-screen range/zoom button (reliable single tap; bottom, above the 'S' marker)
     s_zoomBtn = lv_btn_create(s_tileRadar);
     lv_obj_set_size(s_zoomBtn, 120, 44);
-    lv_obj_set_ext_click_area(s_zoomBtn, 18);   // invisibly enlarge the tap target (easier to hit)
+    lv_obj_set_ext_click_area(s_zoomBtn, ZOOM_TAP_PAD_DN);   // invisibly enlarge the tap target (easier to hit),
+    lv_obj_add_flag(s_zoomBtn, LV_OBJ_FLAG_ADV_HITTEST);      // trimmed back to ZOOM_TAP_PAD above and beside it
+    lv_obj_add_event_cb(s_zoomBtn, zoom_hit_cb, LV_EVENT_HIT_TEST, NULL);
     lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -32);
     lv_obj_set_style_radius(s_zoomBtn, 18, 0);
     lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);

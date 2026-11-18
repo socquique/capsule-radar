@@ -63,6 +63,7 @@ static void sdl_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px)
         SDL_RenderClear(s_ren);
         SDL_RenderCopy(s_ren, s_tex, NULL, NULL);
         SDL_RenderPresent(s_ren);
+        ui_frame_done();
     }
     lv_disp_flush_ready(drv);
 }
@@ -215,6 +216,8 @@ int main(int argc, char **argv) {
 
     ui_create();
     ui_set_range_cb(sim_range_cb);   // on-screen zoom button
+    radar::setThemeChangedCb([](int) { ui_apply_theme(); });
+    ui_apply_theme();
     ui_set_range_km(RANGE_KM_DEFAULT);
     ui_set_poweroff_cb([]() {});   // mock: represent a PMIC-fitted board (shows the Stats power-off button)
     mock_init();

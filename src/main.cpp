@@ -422,6 +422,11 @@ static void saveTheme(int t) {
     p.end();
 }
 
+static void onThemeChanged(int t) {
+    saveTheme(t);
+    ui_apply_theme();   // range button follows the scope colour
+}
+
 // Convert a UTC broken-down time to time_t (mktime assumes local TZ, so flip to UTC0).
 static time_t utc_to_time(struct tm *utc) {
     setenv("TZ", "UTC0", 1); tzset();
@@ -1313,7 +1318,8 @@ void setup() {
         display::setRotation((uint16_t)g_rotation);
         g_rotation = display::rotation();
     }
-    radar::setThemeChangedCb(saveTheme);
+    radar::setThemeChangedCb(onThemeChanged);
+    ui_apply_theme();                            // the theme restored above
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_temp_unit(g_tempUnit);                // and the weather temperature unit
