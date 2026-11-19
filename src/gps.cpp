@@ -16,6 +16,7 @@
 #include <Wire.h>
 #include <TinyGPS++.h>
 
+#if BOARD_HAS_GPS
 #define GPS_ADDR_W      0x50
 #define GPS_ADDR_R      0x54
 #define GPS_ADDR_DW     0x58       // data-write endpoint: command text goes here (see gps_write)
@@ -389,3 +390,16 @@ int gps_satellites() {
 float gps_altitude_m() {
     return s_gps.altitude.isValid() ? (float)s_gps.altitude.meters() : NAN;
 }
+
+#else   // !BOARD_HAS_GPS
+
+bool gps_begin()                  { return false; }
+bool gps_present()                { return false; }
+void gps_set_idle_hook(void (*)()) {}
+void gps_poll()                   {}
+bool gps_has_fix()                { return false; }
+bool gps_location(double *, double *) { return false; }
+int  gps_satellites()             { return 0; }
+float gps_altitude_m()            { return NAN; }
+
+#endif  // BOARD_HAS_GPS

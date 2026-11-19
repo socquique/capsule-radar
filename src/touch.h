@@ -2,7 +2,7 @@
 // Capacitive touch, board-neutral interface. Device-only.
 // Exactly one driver compiles per build, chosen by the board header:
 //   TOUCH_DRIVER_CST9217 -> touch_cst9217.cpp  (1.75)
-//   TOUCH_DRIVER_CST820  -> touch_cst820.cpp   (LCD 2.1)
+//   TOUCH_DRIVER_CST820  -> touch_cst820.cpp   (LCD 2.1, LCD 1.85C V2 CST816)
 //   TOUCH_DRIVER_FT3168  -> touch_ft3168.cpp   (1.43)
 #include <stdint.h>
 
@@ -12,4 +12,4 @@
 enum TouchRead { TOUCH_UP, TOUCH_DOWN, TOUCH_NODATA };
 
 bool touch_begin();                             // I2C + reset; logs comms status
-TouchRead touch_read(uint16_t *x, uint16_t *y); // TOUCH_DOWN: x,y set (screen px)
+TouchRead touch_read(uint16_t *x, uint16_t *y); // TOUCH_DOWN: x,y set (panel px)
