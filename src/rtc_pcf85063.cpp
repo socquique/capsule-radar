@@ -13,6 +13,11 @@ static inline uint8_t bcd2dec(uint8_t b) { return (uint8_t)((b >> 4) * 10 + (b &
 static inline uint8_t dec2bcd(uint8_t d) { return (uint8_t)(((d / 10) << 4) | (d % 10)); }
 
 bool rtc_begin() {
+#if !BOARD_HAS_RTC
+    s_ok = false;
+    Serial.println("[rtc] none on this board");
+    return false;
+#endif
     Wire.beginTransmission(I2C_ADDR_RTC);
     s_ok = (Wire.endTransmission() == 0);
     Serial.printf("[rtc] PCF85063 %s\n", s_ok ? "ready" : "not found");

@@ -1282,6 +1282,9 @@ void setup() {
     loadSettings();
     route_cache_begin();   // clear stale route cache if the label format changed
 
+#if defined(BOARD_STOPWATCH)
+    board_power_begin();   // panel/touch power + reset live on the PMIC/expander, not GPIOs
+#endif
     // --- Display + LVGL (M0) ----------------------------------------------
     // CO5300 AMOLED over QSPI + LVGL draw buffers in PSRAM, then a hello screen.
     // The panel is powered from the always-on DC1 rail, so it lights without the
@@ -1398,6 +1401,10 @@ void setup() {
     } else {
         Serial.println("[wifi] config portal open - join 'CapsuleRadar-Setup' to set WiFi; UI stays live");
         g_bootedIntoPortal = true;   // saved WiFi may just not be up yet (car hotspot) -> loop() retries it
+        // Left on, auto-reconnect keeps the STA scanning for the saved network non-stop, hopping
+        // the portal off its channel so phones never see it. loop() retries in short attempts instead.
+        WiFi.setAutoReconnect(false);
+        WiFi.disconnect(false, false);
     }
 
     // --- OTA ---------------------------------------------------------------
@@ -1501,19 +1508,48 @@ static void loop_pass() {
         battery_power_off();
     }
 
+#if defined(PIN_KEY_A)
+    {   // hardware keys (active low): act on the press edge, 30 ms debounce
+        static const uint8_t pins[2] = { PIN_KEY_A, PIN_KEY_B };
+        static bool down[2];
+        static uint32_t since[2];
+        static bool init = false;
+        if (!init) { for (int i = 0; i < 2; ++i) pinMode(pins[i], INPUT_PULLUP); init = true; }
+        for (int i = 0; i < 2; ++i) {
+            const bool now = digitalRead(pins[i]) == LOW;
+            if (now == down[i]) { since[i] = millis(); continue; }
+            if (millis() - since[i] < 30) continue;
+            down[i] = now;
+            if (now) ui_key(i, g_idle);
+        }
+    }
+#endif
+
     // Car use: the saved WiFi often appears 30-60 s AFTER boot (vehicle hotspot). If we booted
     // into the portal despite having saved credentials, keep retrying them in the background;
     // once the network shows up, reboot for a clean start (same rationale as the post-config
     // reboot: WiFiManager's portal server doesn't hand port 80 / mDNS over cleanly).
     if (g_bootedIntoPortal && !g_rebootAtMs) {
         static uint32_t lastRetry = 0;
+        static bool attempting = false;
+        // Each WiFi.begin() scans every channel, taking the portal off the air for a moment:
+        // never do it while a phone is on the portal.
+        static int lastClients = -1;
+        const int clients = WiFi.softAPgetStationNum();
+        if (clients != lastClients) { Serial.printf("[wifi] portal clients: %d\n", clients); lastClients = clients; }
         if (WiFi.status() == WL_CONNECTED) {
             Serial.println("[wifi] saved network appeared -> restarting for a clean start");
             g_rebootAtMs = millis() + 800;
-        } else if (millis() - lastRetry > 20000UL && g_wm.getWiFiIsSaved()) {
+        } else if (clients == 0 && millis() - lastRetry > 20000UL && g_wm.getWiFiIsSaved()) {
             lastRetry = millis();
+            attempting = true;
             Serial.println("[wifi] retrying saved network in the background...");
             WiFi.begin();                     // uses the stored credentials
+        } else if (attempting && millis() - lastRetry > 6000UL) {
+            // An unanswered begin() keeps the STA scanning forever, hopping the portal's channel
+            // so phones never see it. End each attempt, keeping the saved credentials.
+            attempting = false;
+            WiFi.disconnect(false, false);
         }
     }
 

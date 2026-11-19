@@ -27,3 +27,4 @@ void ui_set_temp_unit(int t);                // weather temperature: 0 = follow 
 void ui_set_large_text(bool on);             // accessibility: bigger fonts everywhere. Call BEFORE ui_create()
 void ui_set_weather_forecast(bool forecast); // false = WX radar, true = 3-day forecast
 void ui_set_poweroff_cb(void (*cb)(void));   // Stats view: hold the Power off button
+void ui_key(int key, bool idle);             // hardware key on the radar: 0 = zoom step, 1 = next theme; idle: only wake
