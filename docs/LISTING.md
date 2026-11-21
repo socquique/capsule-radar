@@ -222,7 +222,7 @@ Once it's running, you can update wirelessly:
 - Aircraft data: **airplanes.live** (free, **non-commercial / educational** use). Routes:
   **adsbdb.com**. Please keep request rates gentle — this firmware already does.
 - Hardware: **Waveshare ESP32-S3-Touch-AMOLED-1.75**.
-- Firmware & web flasher (open source): **https://github.com/socquique/capsule-radar**
+- Firmware & web flasher (non-commercial, PolyForm Noncommercial 1.0.0): **https://github.com/socquique/capsule-radar**
 - Suggested model license (consistent with the non-commercial data sources):
   **CC BY-NC 4.0** (Attribution-NonCommercial).
 
