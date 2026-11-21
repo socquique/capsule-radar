@@ -138,7 +138,7 @@ Open source (firmware + simulator + web flasher):
 - Aircraft data: **airplanes.live** (free, **non-commercial / educational** use) ·
   routes: **adsbdb.com**. Please keep request rates gentle.
 - Hardware: Waveshare ESP32-S3-Touch-AMOLED-1.75.
-- Firmware: open source (see the repo for the license).
+- Firmware: source-available, non-commercial (PolyForm Noncommercial 1.0.0, see the repo).
 
 ## License (pick one on MakerWorld)
 Because the project relies on **non-commercial** data sources, a non-commercial model
